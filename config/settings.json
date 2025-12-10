@@ -1,0 +1,51 @@
+{
+  "mode": "auto",
+  "simulation": true,
+  "auto_threshold": true,
+  "auto_target_color": "green",
+  "wheel_polarity": {
+    "front_left": 1,
+    "front_right": 1,
+    "rear_left": 1,
+    "rear_right": 1
+  },
+  "wheels": {
+    "front_left": 7.300000000000001,
+    "front_right": -7.300000000000001,
+    "rear_left": 7.300000000000001,
+    "rear_right": -7.300000000000001
+  },
+  "arm": {
+    "base": 76.3125,
+    "shoulder": 105,
+    "elbow": 130,
+    "wrist": 90.0,
+    "gripper": 10.0
+  },
+  "thresholds": {
+    "red": {
+      "hue_min": 0,
+      "hue_max": 30,
+      "sat_min": 8,
+      "sat_max": 115,
+      "val_min": 18,
+      "val_max": 172
+    },
+    "green": {
+      "hue_min": 0,
+      "hue_max": 30,
+      "sat_min": 8,
+      "sat_max": 115,
+      "val_min": 18,
+      "val_max": 172
+    },
+    "blue": {
+      "hue_min": 0,
+      "hue_max": 30,
+      "sat_min": 8,
+      "sat_max": 115,
+      "val_min": 18,
+      "val_max": 172
+    }
+  }
+}

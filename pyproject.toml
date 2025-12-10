@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hta2209"
+version = "0.1.0"
+description = "Raspberry Pi renk tabanlı mobil manipülatör GUI ve denetleyici paketi"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "HTA2209 Team" }]
+dependencies = []
+
+[project.scripts]
+hta2209-gui = "hta2209.gui:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
