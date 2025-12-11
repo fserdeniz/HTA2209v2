@@ -67,6 +67,9 @@ class HTAControlGUI:
 
         self.source_type_var = tk.StringVar(value="camera")
         self.camera_index_var = tk.IntVar(value=0)
+        self.camera_choice_var = tk.StringVar(value="")
+        self._camera_failures = 0
+        self._current_camera_index: int | None = None
         self.camera_status_var = tk.StringVar(value="Kamera kapali")
         self.folder_path_var = tk.StringVar(value="")
         self.video_path_var = tk.StringVar(value="")
@@ -75,11 +78,13 @@ class HTAControlGUI:
         self.camera_running = False
         self.camera_capture: cv2.VideoCapture | None = None
         self.camera_loop_id: str | None = None
+        self.camera_combo: ttk.Combobox | None = None
         self._camera_photo = None
         self._last_frame = None
         self._auto_frame_counter = 0
         self._folder_images: list[Path] = []
         self._folder_index: int = 0
+        self._camera_devices: list[tuple[int, str]] = []
         self.ai_detection_var = tk.BooleanVar(value=False)
         self.ai_colors_var = tk.StringVar(value="")
         self.metric_labels: Dict[str, tk.StringVar] = {}
@@ -97,6 +102,7 @@ class HTAControlGUI:
         self.repo_root = Path(__file__).resolve().parents[2]
 
         self._create_widgets()
+        self._refresh_camera_devices()
         self.refresh_from_controller()
         self.root.bind_all("<KeyPress>", self._on_key_press)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -420,20 +426,131 @@ class HTAControlGUI:
             self.folder_path_var.set(path)
             self.source_type_var.set("folder")
 
+    # Camera discovery helpers ---------------------------------------- #
+    def _format_camera_label(self, index: int, name: str) -> str:
+        return f"/dev/video{index} - {name}"
+
+    def _is_capture_device(self, index: int) -> bool:
+        """Return True if device is a real capture node (skip ISP/codec)."""
+        sys_path = Path(f"/sys/class/video4linux/video{index}")
+        driver = ""
+        driver_link = sys_path / "device/driver"
+        if driver_link.exists():
+            try:
+                driver = driver_link.resolve().name
+            except OSError:
+                driver = ""
+
+        # Prefer USB UVC cameras; skip bcm2835 ISP/codec nodes
+        if driver and driver not in {"uvcvideo"}:
+            return False
+
+        try:
+            proc = subprocess.run(
+                ["v4l2-ctl", "-d", f"/dev/video{index}", "--info"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            # v4l2-ctl yoksa sadece driver filtresine göre karar ver
+            return driver == "uvcvideo"
+        if proc.returncode != 0:
+            return False
+        stdout = proc.stdout
+        if "Driver name" in stdout and "bcm2835" in stdout.split("Driver name", 1)[1]:
+            return False
+        # Device Caps satirinda Video Capture var mi?
+        return "Device Caps" in stdout and "Video Capture" in stdout.split("Device Caps", 1)[1]
+
+    def _refresh_camera_devices(self) -> None:
+        devices: list[tuple[int, str]] = []
+        base = Path("/sys/class/video4linux")
+        if base.exists():
+            for entry in sorted(base.glob("video*")):
+                try:
+                    idx = int(entry.name.replace("video", ""))
+                except ValueError:
+                    continue
+                if not self._is_capture_device(idx):
+                    continue
+                name_file = entry / "name"
+                name = name_file.read_text().strip() if name_file.exists() else "Bilinmiyor"
+                devices.append((idx, name))
+        self._camera_devices = devices
+        self._update_camera_combo()
+
+        if not devices:
+            self.camera_choice_var.set("")
+            return
+
+        current_idx = self.camera_index_var.get()
+        available_indices = [idx for idx, _ in devices]
+        if current_idx not in available_indices:
+            current_idx = devices[0][0]
+            self.camera_index_var.set(current_idx)
+        for idx, name in devices:
+            if idx == current_idx:
+                self.camera_choice_var.set(self._format_camera_label(idx, name))
+                break
+
+    def _update_camera_combo(self) -> None:
+        if self.camera_combo is None:
+            return
+        values = [self._format_camera_label(idx, name) for idx, name in self._camera_devices]
+        self.camera_combo["values"] = values
+        if values and self.camera_choice_var.get() not in values:
+            self.camera_choice_var.set(values[0])
+            self.camera_index_var.set(self._camera_devices[0][0])
+        if not values:
+            self.camera_choice_var.set("")
+
+    def _on_camera_choice(self, _event=None) -> None:
+        choice = self.camera_choice_var.get()
+        for idx, name in self._camera_devices:
+            if choice.startswith(f"/dev/video{idx}"):
+                self.camera_index_var.set(idx)
+                return
+
     def _start_stream(self) -> None:
         self._stop_stream()
         source = self.source_type_var.get()
         if source == "camera":
-            index = self.camera_index_var.get()
-            capture = cv2.VideoCapture(index)
-            if not capture.isOpened():
-                self.camera_status_var.set(f"Kamera acilamadi (index {index})")
-                messagebox.showerror("Kamera", f"Kamera acilamadi (index {index})")
-                capture.release()
+            if not self._camera_devices:
+                self._refresh_camera_devices()
+            if not self._camera_devices:
+                self.camera_status_var.set("Kamera bulunamadi")
+                messagebox.showerror("Kamera", "Hicbir /dev/video* cihazi bulunamadi.")
                 return
+            index = self.camera_index_var.get()
+            available_indices = [idx for idx, _ in self._camera_devices]
+            if index not in available_indices:
+                index = self._camera_devices[0][0]
+                self.camera_index_var.set(index)
+
+            # Try preferred index first, then fall back to others if it fails
+            ordered_candidates = [index] + [i for i in available_indices if i != index]
+            capture: cv2.VideoCapture | None = None
+            chosen_index: int | None = None
+            for candidate in ordered_candidates:
+                capture = self._open_camera_capture(candidate)
+                if capture is not None:
+                    chosen_index = candidate
+                    break
+            if capture is None or chosen_index is None:
+                self.camera_status_var.set(f"Kamera acilamadi (denenen indexler: {ordered_candidates})")
+                messagebox.showerror(
+                    "Kamera",
+                    "Kamera acilamadi. USB baglantisini/kabloyu kontrol edin ve tekrar deneyin.",
+                )
+                return
+
+            self.camera_index_var.set(chosen_index)
             self.camera_capture = capture
             self.camera_running = True
-            self.camera_status_var.set(f"Kamera acik (index {index})")
+            self._camera_failures = 0
+            self._current_camera_index = chosen_index
+            self.camera_status_var.set(f"Kamera acik (index {chosen_index}, 640x480 YUYV @10fps)")
             self._update_camera_frame()
         elif source == "video":
             path = self.video_path_var.get()
@@ -481,6 +598,8 @@ class HTAControlGUI:
         self._last_frame = None
         self._folder_images = []
         self._folder_index = 0
+        self._camera_failures = 0
+        self._current_camera_index = None
 
     def _update_camera_frame(self) -> None:
         if not self.camera_running:
@@ -499,9 +618,23 @@ class HTAControlGUI:
                 self.camera_status_var.set("Video bitti")
                 self._stop_stream()
             else:
+                self._camera_failures += 1
+                if self._camera_failures >= 5:
+                    # Kamera takilip cikartilmis veya format bozulmus olabilir, yeniden ac
+                    if self._current_camera_index is not None:
+                        new_cap = self._open_camera_capture(self._current_camera_index)
+                        if new_cap is not None:
+                            if self.camera_capture is not None:
+                                self.camera_capture.release()
+                            self.camera_capture = new_cap
+                            self._camera_failures = 0
+                            self.camera_status_var.set(
+                                f"Kamera yeniden acildi (index {self._current_camera_index})"
+                            )
                 self.camera_status_var.set("Kare okunamadi, tekrar denenecek...")
                 self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_camera_frame)
             return
+        self._camera_failures = 0
         self._last_frame = frame.copy()
         display_frame = frame
 
@@ -729,10 +862,16 @@ class HTAControlGUI:
         )
         row += 1
 
-        ttk.Label(cam_box, text="Kamera Index:").grid(row=row, column=0, sticky="w")
-        tk.Spinbox(cam_box, from_=0, to=10, textvariable=self.camera_index_var, width=5).grid(
-            row=row, column=1, padx=5, pady=2
+        ttk.Label(cam_box, text="Kamera Sec:").grid(row=row, column=0, sticky="w")
+        self.camera_combo = ttk.Combobox(
+            cam_box,
+            textvariable=self.camera_choice_var,
+            state="readonly",
+            width=28,
         )
+        self.camera_combo.grid(row=row, column=1, columnspan=2, padx=5, pady=2, sticky="ew")
+        self.camera_combo.bind("<<ComboboxSelected>>", self._on_camera_choice)
+        ttk.Button(cam_box, text="Yenile", command=self._refresh_camera_devices).grid(row=row, column=3, pady=2, sticky="ew")
         row += 1
 
         ttk.Button(cam_box, text="Video Sec", command=self._select_video).grid(row=row, column=0, columnspan=2, pady=2, sticky="ew")
@@ -849,6 +988,27 @@ class HTAControlGUI:
     def _on_auto_threshold_toggle(self) -> None:
         enabled = self.auto_threshold_var.get()
         self.controller.set_auto_threshold_enabled(enabled)
+
+    # ------------------------------------------------------------------ #
+    def _open_camera_capture(self, index: int) -> cv2.VideoCapture | None:
+        """Open camera with a safe default format and verify frame read."""
+        backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
+        for backend in backends:
+            cap = cv2.VideoCapture(index, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+            # Safer defaults for USB2 cams: lower res + YUYV
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 10)
+            for _ in range(3):
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    return cap
+            cap.release()
+        return None
 
     def _manual_auto_calibrate(self) -> None:
         if self._last_frame is None:
