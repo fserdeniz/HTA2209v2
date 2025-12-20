@@ -265,14 +265,21 @@ class RobotController:
         def drive_side(speed: float, pwm, pin_a: int, pin_b: int, side_name: str, invert: bool = False) -> None:
             duty = max(-100.0, min(100.0, speed))
             if duty >= 0:
-                # invert=True ise pinlerin seviyesi terslenir (sag taraf kablolamasi icin)
                 GPIO.output(pin_a, GPIO.LOW if invert else GPIO.HIGH)
                 GPIO.output(pin_b, GPIO.HIGH if invert else GPIO.LOW)
             else:
                 GPIO.output(pin_a, GPIO.HIGH if invert else GPIO.LOW)
                 GPIO.output(pin_b, GPIO.LOW if invert else GPIO.HIGH)
             pwm.ChangeDutyCycle(abs(duty))
-            LOGGER.info("L298N %s duty %.1f -> pins (%s=%s, %s=%s)", side_name, duty, pin_a, int(duty>=0), pin_b, int(duty<0))
+            LOGGER.info(
+                "L298N %s duty %.1f -> pins (%s=%s, %s=%s)",
+                side_name,
+                duty,
+                pin_a,
+                int(duty >= 0),
+                pin_b,
+                int(duty < 0),
+            )
 
         try:
             drive_side(left, self._ena_pwm, self.l298n_pins["in1"], self.l298n_pins["in2"], "SOL", invert=False)
