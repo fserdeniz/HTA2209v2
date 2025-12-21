@@ -872,7 +872,9 @@ class RobotController:
             else:
                 return
 
-        # hic aday yok: gripper zamanlayicilarini yonet
+        # hic aday yok: eski hedefi sil ve gripper zamanlayicilarini yonet
+        self.last_target = None
+        self.last_target_color = None
         if self._target_was_visible:
             # hedef cikti, ters yonde kisa sure calistir
             if (
