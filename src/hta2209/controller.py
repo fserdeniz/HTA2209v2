@@ -163,9 +163,10 @@ class RobotController:
         self.gripper_burst_until: float = 0.0
         self.gripper_reverse_until: float = 0.0
         self._target_was_visible: bool = False
-        self._gripper_fired: bool = False
         self.gripper_cooldown_until: float = 0.0
         self._last_auto_calib: float = 0.0
+        self._coverage_smooth: float = 0.0
+        self._last_seen_time: float = 0.0
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
         self.load_config()
@@ -558,9 +559,10 @@ class RobotController:
         self.gripper_burst_until = 0.0
         self.gripper_reverse_until = 0.0
         self._target_was_visible = False
-        self._gripper_fired = False
         self.gripper_cooldown_until = 0.0
         self._last_auto_calib = 0.0
+        self._coverage_smooth = 0.0
+        self._last_seen_time = 0.0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
         if self.hbridge_ready and GPIO is not None:
@@ -716,6 +718,10 @@ class RobotController:
         self.gripper_burst_until = 0.0
         self.gripper_reverse_until = 0.0
         self._target_was_visible = False
+        self.gripper_cooldown_until = 0.0
+        self._last_auto_calib = 0.0
+        self._coverage_smooth = 0.0
+        self._last_seen_time = 0.0
 
     def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int], dominant_colors: Optional[list[str]] = None) -> None:
         """
@@ -745,11 +751,9 @@ class RobotController:
                 and self.gripper_burst_until == 0.0
                 and self.gripper_reverse_until == 0.0
                 and now >= self.gripper_cooldown_until
-                and not self._gripper_fired
             ):
                 self.set_continuous_speed("gripper", 25.0)
                 self.gripper_burst_until = now + 5.0
-                self._gripper_fired = True
                 self.gripper_cooldown_until = now + 7.0
                 LOGGER.info("Auto: dominant renkler %s (>=2 hedef), gripper +25%% 3sn", dominant_colors)
 
@@ -780,12 +784,14 @@ class RobotController:
                 self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
 
             cx, cy, area, depth_norm, mask_ratio, _color = best_target
+            self._last_seen_time = now
             # Ayni renkte ardil tespitleri say
             if best_color != self.last_target_color:
                 self.auto_detect_hits = 0
             self.last_target_color = best_color
             self.auto_detect_hits += 1
             self._target_was_visible = True
+            self._gripper_fired = False  # takipte yeniden tetiklemeye izin ver (cooldown korunur)
             LOGGER.info(
                 "Auto: aday (%s) hit %s/5 alan=%d oran=%.3f",
                 best_color,
@@ -797,18 +803,24 @@ class RobotController:
             frame_area = max(1, int(frame_size[0] * frame_size[1]))
             target_area = 1280 * 720
             coverage_1280 = mask_ratio * (frame_area / target_area)
+            # Sinyali yumuşat
+            self._coverage_smooth = 0.6 * self._coverage_smooth + 0.4 * coverage_1280
+            cov = self._coverage_smooth
             # Hedefe dogru yonel: goruntu ortasina gelene kadar don, hedef yakinsa ileri hiz dusur
             center_x = frame_size[0] // 2
             error_x = cx - center_x
             norm_err = max(-1.0, min(1.0, error_x / max(1.0, frame_size[0] / 2)))
             turn_cmd = max(-25.0, min(25.0, -norm_err * 45.0))  # hedef saga ise negatif donus
             desired_cov = 0.32
-            fwd_cmd = (desired_cov - coverage_1280) * 140.0
-            # Güvenli sınırlar: ileri maks 50, geri maks -25
-            fwd_cmd = max(-25.0, min(50.0, fwd_cmd))
-            # Hedef çok yakınsa hafif geri çekil
-            if coverage_1280 >= 0.60:
-                fwd_cmd = -20.0
+            approach_band = 0.05  # ± tolerans
+            if cov < desired_cov - approach_band:
+                fwd_cmd = min(60.0, max(15.0, (desired_cov - cov) * 180.0))
+            elif cov > 0.58:
+                fwd_cmd = -25.0
+            elif cov > desired_cov + approach_band:
+                fwd_cmd = -15.0
+            else:
+                fwd_cmd = 0.0
             # Hedef teyidi yoksa (hit<2) ileri/geri yapma, sadece yönlen
             if self.auto_detect_hits < 2:
                 fwd_cmd = 0.0
@@ -829,11 +841,9 @@ class RobotController:
                 and self.gripper_burst_until == 0.0
                 and self.gripper_reverse_until == 0.0
                 and now >= self.gripper_cooldown_until
-                and not self._gripper_fired
             ):
                 self.set_continuous_speed("gripper", 25.0)
                 self.gripper_burst_until = now + 5.0
-                self._gripper_fired = True
                 self.gripper_cooldown_until = now + 7.0
                 LOGGER.info(
                     "Auto: hedef alan buyuk, gripper +25%% 5sn (oran=%.3f, 1280x720 karsilik=%.3f)",
@@ -851,19 +861,22 @@ class RobotController:
         # hic aday yok: gripper zamanlayicilarini yonet
         if self._target_was_visible:
             # hedef cikti, ters yonde kisa sure calistir
-            if self.gripper_reverse_until == 0.0 and now >= self.gripper_cooldown_until:
+            if (
+                self.gripper_reverse_until == 0.0
+                and now - self._last_seen_time >= 1.0
+                and now >= self.gripper_cooldown_until
+            ):
                 self.set_continuous_speed("gripper", -25.0)
                 self.gripper_reverse_until = now + 3.0
                 self._target_was_visible = False
-                self._gripper_fired = False
                 self.gripper_cooldown_until = now + 5.0
                 LOGGER.info("Auto: hedef gorunumden cikti, gripper -25%% 3sn")
             # hedef kaybolduysa arac da duraklasin
-            self.stop_wheels()
+            if now - self._last_seen_time >= 1.0:
+                self.stop_wheels()
         if self.gripper_reverse_until and now > self.gripper_reverse_until:
             self.set_continuous_speed("gripper", 0.0)
             self.gripper_reverse_until = 0.0
-            self._gripper_fired = False
             self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
         if self.gripper_burst_until and now > self.gripper_burst_until:
             self.set_continuous_speed("gripper", 0.0)
