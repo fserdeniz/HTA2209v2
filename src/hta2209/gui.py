@@ -692,7 +692,7 @@ class HTAControlGUI:
 
         if not self.controller.is_manual():
             hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
-            self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]), dominant_colors=dominant_list)
+            self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
             if self.controller.last_target:
                 lt = self.controller.last_target
                 cx, cy, area = lt[0], lt[1], lt[2]
@@ -774,7 +774,7 @@ class HTAControlGUI:
 
             if not self.controller.is_manual():
                 hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
-                self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]), dominant_colors=dominant_list)
+                self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
                 if self.controller.last_target:
                     lt = self.controller.last_target
                     cx, cy, area = lt[0], lt[1], lt[2]
@@ -867,7 +867,7 @@ class HTAControlGUI:
 
         if not self.controller.is_manual():
             hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
-            self.controller.autopilot_step(hsv, (display_frame.shape[1], display_frame.shape[0]), dominant_colors=dominant_list)
+            self.controller.autopilot_step(hsv, (display_frame.shape[1], display_frame.shape[0]))
             if self.controller.last_target:
                 lt = self.controller.last_target
                 cx, cy, area = lt[0], lt[1], lt[2]

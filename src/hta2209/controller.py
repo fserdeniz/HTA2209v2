@@ -8,6 +8,7 @@ import logging
 import atexit
 import time
 from dataclasses import dataclass
+from enum import Enum, auto
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
@@ -61,6 +62,16 @@ DEFAULT_L298N_PINS = {
 
 SUPPORTED_MODES = ("manual", "auto")
 DEFAULT_COLORS = ("red", "green", "blue", "yellow", "orange", "purple", "cyan")
+
+
+class AutopilotState(Enum):
+    """Explicit states for the autonomous behavior."""
+    IDLE = auto()
+    SCANNING = auto()
+    TRACKING = auto()
+    APPROACHING = auto()
+    GRASPING = auto()
+    SEARCH_FAILED = auto()
 
 
 class GuiLogHandler(logging.Handler):
@@ -149,13 +160,11 @@ class RobotController:
         self.run_state: str = "stopped"  # started, paused, stopped
         self.last_target: Optional[Tuple[int, int, int]] = None  # (cx, cy, area)
         self.last_target_color: Optional[str] = None
-        # Auto tarama durumu
-        self.auto_scan_active: bool = False
-        self.auto_scan_started_at: float = 0.0
+        # Autopilot state machine
+        self.autopilot_state: AutopilotState = AutopilotState.IDLE
+        self.auto_state_started_at: float = 0.0
         self.auto_scan_step: int = 0
-        self.auto_scan_phase: str = "idle"  # idle | wait | rotate | hold | done
         self.auto_detect_hits: int = 0
-        self.auto_scan_completed: bool = False
         self.supply_voltage: float = 5.0
         self.supply_current: float = 0.0
         self.power_consumption_w: float = 0.0
@@ -176,6 +185,7 @@ class RobotController:
         self._gripper_fired: bool = False
         self._drive_turn_smooth: float = 0.0
         self._drive_fwd_smooth: float = 0.0
+        self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
         self.load_config()
@@ -302,45 +312,35 @@ class RobotController:
         """L298N uzerinden sol/sağ taraf hizlarini uygula."""
         if not self.hbridge_ready:
             return
-        # Ortalama ile sol/sag hizini cikar
-        left_vals = [self.wheel_state[w] for w in self.wheel_state if "left" in w]
-        right_vals = [self.wheel_state[w] for w in self.wheel_state if "right" in w]
+        # Ortalama ile sol/sag hizini cikar, polariteyi uygula
+        left_vals = [self.wheel_state[w] * self.wheel_polarity.get(w, 1) for w in self.wheel_state if "left" in w]
+        right_vals = [self.wheel_state[w] * self.wheel_polarity.get(w, 1) for w in self.wheel_state if "right" in w]
         left = sum(left_vals) / max(1, len(left_vals))
         right = sum(right_vals) / max(1, len(right_vals))
-        # Run_state kontrolu: stopped/paused ise hizlari sifirla
+        
         if not self.is_running():
             left = 0.0
             right = 0.0
 
-        def drive_side(speed: float, pwm, pin_a: int, pin_b: int, side_name: str, invert: bool = False) -> None:
+        def drive_side(speed: float, pwm, pin_a: int, pin_b: int, side_name: str) -> None:
             duty = max(-100.0, min(100.0, speed))
             if abs(duty) < 1e-3:
-                # Tamamen durdur: her iki pin LOW, PWM 0
                 GPIO.output(pin_a, GPIO.LOW)
                 GPIO.output(pin_b, GPIO.LOW)
                 pwm.ChangeDutyCycle(0)
-                LOGGER.info("L298N %s duty 0 -> pins (%s=0, %s=0)", side_name, pin_a, pin_b)
                 return
             if duty >= 0:
-                GPIO.output(pin_a, GPIO.LOW if invert else GPIO.HIGH)
-                GPIO.output(pin_b, GPIO.HIGH if invert else GPIO.LOW)
+                GPIO.output(pin_a, GPIO.HIGH)
+                GPIO.output(pin_b, GPIO.LOW)
             else:
-                GPIO.output(pin_a, GPIO.HIGH if invert else GPIO.LOW)
-                GPIO.output(pin_b, GPIO.LOW if invert else GPIO.HIGH)
+                GPIO.output(pin_a, GPIO.LOW)
+                GPIO.output(pin_b, GPIO.HIGH)
             pwm.ChangeDutyCycle(abs(duty))
-            LOGGER.info(
-                "L298N %s duty %.1f -> pins (%s=%s, %s=%s)",
-                side_name,
-                duty,
-                pin_a,
-                int(duty >= 0),
-                pin_b,
-                int(duty < 0),
-            )
+            LOGGER.debug("L298N %s duty %.1f", side_name, duty)
 
         try:
-            drive_side(left, self._ena_pwm, self.l298n_pins["in1"], self.l298n_pins["in2"], "SOL", invert=False)
-            drive_side(right, self._enb_pwm, self.l298n_pins["in3"], self.l298n_pins["in4"], "SAG", invert=True)
+            drive_side(left, self._ena_pwm, self.l298n_pins["in1"], self.l298n_pins["in2"], "SOL")
+            drive_side(right, self._enb_pwm, self.l298n_pins["in3"], self.l298n_pins["in4"], "SAG")
         except Exception as exc:  # pragma: no cover
             LOGGER.error("L298N hiz uygulanamadi: %s", exc)
 
@@ -487,6 +487,31 @@ class RobotController:
         self.run_state = raw.get("run_state", "stopped")
         self.set_run_state("stopped")
 
+        # Autopilot ayarlarını yükle
+        self.autopilot_config = {
+            "scan_initial_wait": 3.0,
+            "scan_rotate_duration": 0.5,
+            "scan_hold_duration": 5.0,
+            "scan_steps": 18,
+            "scan_turn_speed": 30.0,
+            "approach_area_threshold": 0.1,
+            "stop_area_threshold": 0.15,
+            "backward_area_threshold": 0.2,
+            "backward_speed": -6.0,
+            "tracking_turn_gain": 20.0,
+            "tracking_forward_gain": 50.0,
+            "tracking_turn_speed_max": 15.0,
+            "tracking_forward_speed_max": 15.0,
+            "tracking_deadband": 0.1,
+        }
+        autopilot_conf = raw.get("autopilot", {})
+        for key, val in autopilot_conf.items():
+            if key in self.autopilot_config:
+                try:
+                    self.autopilot_config[key] = float(val)
+                except (ValueError, TypeError):
+                    LOGGER.warning("Autopilot config degeri gecersiz: %s=%s", key, val)
+
         # Pozisyonel eklemleri mevcut acida tut (servo salmasin)
         if self.hardware_ready and not self.is_simulation():
             for joint in self.arm_state:
@@ -528,7 +553,7 @@ class RobotController:
         LOGGER.info("Kontrol modu %s olarak ayarlandi.", normalized)
         self.stop_all_motion()
         self.auto_grasped = False
-        self._reset_auto_scan()
+        self._reset_autopilot()
 
     def is_manual(self) -> bool:
         return self.mode == "manual"
@@ -550,7 +575,7 @@ class RobotController:
         self.run_state = normalized
         if normalized in ("paused", "stopped"):
             self.stop_all_motion()
-            self._reset_auto_scan()
+            self._reset_autopilot()
         if normalized == "stopped":
             self.auto_grasped = False
         LOGGER.info("Calisma durumu %s olarak ayarlandi.", normalized)
@@ -776,13 +801,42 @@ class RobotController:
         joint_target = 90 + norm_error * 60  # ±60 deg
         self.set_joint_angle("joint", joint_target)
 
-    def _reset_auto_scan(self) -> None:
-        self.auto_scan_active = False
-        self.auto_scan_started_at = 0.0
+    def _find_best_target(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> Optional[Tuple]:
+        """Find the best target in the frame by iterating through allowed colors."""
+        # Yalnızca sarı ve kırmızı takip edilebilir; mavi tamamen devre dışı
+        if self.auto_target_color in ("yellow", "red"):
+            allowed_colors = (self.auto_target_color,)
+        else:
+            allowed_colors = ("yellow", "red")
+
+        best_target = None
+        best_color = None
+        best_conf = -1.0
+        frame_area = max(1, int(frame_size[0] * frame_size[1]))
+        center_x = frame_size[0] // 2
+
+        for color in allowed_colors:
+            _mask, candidate = self._mask_target(hsv_frame, color)
+            if candidate is None:
+                continue
+            cx, cy, area, depth_norm, mask_ratio, _col = candidate
+            area_norm = area / frame_area
+            center_score = max(0.0, 1.0 - abs(cx - center_x) / max(1.0, center_x))
+            conf = area_norm * 0.6 + mask_ratio * 0.8 + center_score * 0.4
+            if conf > best_conf:
+                best_conf = conf
+                best_target = candidate
+                best_color = color
+        
+        if best_target:
+            return best_target + (best_color,)
+        return None
+
+    def _reset_autopilot(self) -> None:
+        self.autopilot_state = AutopilotState.IDLE
+        self.auto_state_started_at = 0.0
         self.auto_scan_step = 0
-        self.auto_scan_phase = "idle"
         self.auto_detect_hits = 0
-        self.auto_scan_completed = False
         self.last_target = None
         self.gripper_burst_until = 0.0
         self.gripper_reverse_until = 0.0
@@ -796,297 +850,147 @@ class RobotController:
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
 
-    def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int], dominant_colors: Optional[list[str]] = None) -> None:
+    def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> None:
         """
-        Auto mod: ilk 10 sn bekle, hedef yoksa 45° adimlarla 360° tarama.
-        Her adim arasi 5 sn bekle; bulunmazsa uyar.
+        Main autopilot state machine.
         """
         if self.is_manual() or not self.is_running():
+            if self.autopilot_state != AutopilotState.IDLE:
+                self._reset_autopilot()
+                self.stop_all_motion()
             return
+
         now = time.monotonic()
 
-        # Gecerli kare yoksa hicbir sey yapma
+        # Frame pre-processing
         if hsv_frame is None or hsv_frame.size == 0:
-            LOGGER.debug("Auto: bos kare, tarama adimi yapilmadi.")
+            LOGGER.debug("Auto: empty frame, skipping step.")
             return
-
-        # Hafif bulanıklaştırma ile gürültüyü azalt
         hsv_proc = cv2.GaussianBlur(hsv_frame, (3, 3), 0)
 
-        # Auto modda periyodik renk kalibrasyonu (her 5 sn)
+        # Periodic auto-calibration
         if self.auto_threshold_enabled and now - self._last_auto_calib >= 5.0:
             self.auto_calibrate_from_frame(hsv_frame)
             self._last_auto_calib = now
-            LOGGER.debug("Auto: periyodik renk kalibrasyonu uygulandi.")
+            LOGGER.debug("Auto: periodic color calibration applied.")
 
-        # Yalnızca sarı ve kırmızı takip edilebilir; mavi tamamen devre dışı
-        if self.auto_target_color in ("yellow", "red"):
-            allowed_colors = (self.auto_target_color,)
-        else:
-            allowed_colors = ("yellow", "red")
-        if dominant_colors:
-            hit_count = sum(1 for c in dominant_colors if c in allowed_colors)
-            if (
-                hit_count >= 2
-                and self.gripper_burst_until == 0.0
-                and self.gripper_reverse_until == 0.0
-                and now >= self.gripper_cooldown_until
-            ):
-                self.set_continuous_speed("gripper", 25.0)
-                self.gripper_burst_until = now + 5.0
-                self.gripper_cooldown_until = now + 7.0
-                LOGGER.info("Auto: dominant renkler %s (>=2 hedef), gripper +25%% 3sn", dominant_colors)
+        best_target = self._find_best_target(hsv_proc, frame_size)
 
-        # En iyi adayi bul (alan + maske orani + merkeze yakinlik ile agirliklandir)
-        best_target = None
-        best_color = None
-        best_conf = -1.0
-        frame_area = max(1, int(frame_size[0] * frame_size[1]))
-        center_x = frame_size[0] // 2
-        center_y = frame_size[1] // 2
-        for color in allowed_colors:
-            _mask, candidate = self._mask_target(hsv_proc, color)
-            if candidate is None:
-                continue
-            cx, cy, area, depth_norm, mask_ratio, _col = candidate
-            area_norm = area / frame_area
-            center_score = max(0.0, 1.0 - abs(cx - center_x) / max(1.0, center_x))
-            conf = area_norm * 0.6 + mask_ratio * 0.8 + center_score * 0.4
-            if conf > best_conf:
-                best_conf = conf
-                best_target = candidate
-                best_color = color
+        # --- State Machine ---
+        state = self.autopilot_state
 
-        if best_target is not None:
-            # Tarama aktifken hedef bulunduysa anında durdur ve aramayı bitir
-            if self.auto_scan_active:
-                self.stop_all_motion()
-                self.auto_scan_active = False
-                self.auto_scan_phase = "done"
-                self.auto_scan_completed = True
-                # Tarama ivmesini kes, takipte sifirdan basla
-                self._drive_turn_smooth = 0.0
-                self._drive_fwd_smooth = 0.0
-                self._last_drive_cmd = (0.0, 0.0)
-                self._last_drive_time = 0.0
-            # Aktif burst/reverse suresi dolduysa durdur
-            if self.gripper_burst_until and now > self.gripper_burst_until:
-                self.set_continuous_speed("gripper", 0.0)
-                self.gripper_burst_until = 0.0
-                self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
-                # aynı hedef icin yeniden firlatilmasin diye fired bayragi kalsin
-            if self.gripper_reverse_until and now > self.gripper_reverse_until:
-                self.set_continuous_speed("gripper", 0.0)
-                self.gripper_reverse_until = 0.0
-                self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
-
-            cx, cy, area, depth_norm, mask_ratio, _color = best_target
-            # Kilitli hedeften aniden sapmayi engelle: son gorulen hedeften uzaksa reddet
-            if self.last_target and (now - self._last_seen_time) < 1.5:
-                prev_cx, prev_cy, *_ = self.last_target
-                max_jump_x = frame_size[0] * 0.25
-                max_jump_y = frame_size[1] * 0.25
-                if abs(cx - prev_cx) > max_jump_x or abs(cy - prev_cy) > max_jump_y:
-                    LOGGER.debug(
-                        "Auto: hedef konumu cok sicti (dx=%d, dy=%d), onceki kilit korunuyor.",
-                        cx - prev_cx,
-                        cy - prev_cy,
-                    )
-                    cx, cy, area, depth_norm, mask_ratio = prev_cx, prev_cy, self.last_target[2], self.last_target[3], self.last_target[4]
-            self._last_seen_time = now
-            # merkez yumuşat (daha hızlı tepki)
-            alpha = 0.4
-            if self._cx_smooth == 0 and self._cy_smooth == 0:
-                self._cx_smooth, self._cy_smooth = cx, cy
-            else:
-                self._cx_smooth = alpha * self._cx_smooth + (1 - alpha) * cx
-                self._cy_smooth = alpha * self._cy_smooth + (1 - alpha) * cy
-            cx_s = self._cx_smooth
-            # Ayni renkte ardil tespitleri say
-            if best_color != self.last_target_color:
-                self.auto_detect_hits = 0
-            self.last_target_color = best_color
-            self.auto_detect_hits += 1
-            self._target_was_visible = True
-            self._gripper_fired = False  # takipte yeniden tetiklemeye izin ver (cooldown korunur)
-            LOGGER.info(
-                "Auto: aday (%s) hit %s/3 alan=%d oran=%.3f",
-                best_color,
-                self.auto_detect_hits,
-                area,
-                mask_ratio,
-            )
-            # Buyuk hedefse gripper tetikle
-            target_area = 1280 * 720
-            coverage_1280 = mask_ratio * (frame_area / target_area)
-            # Sinyali yumuşat
-            self._coverage_smooth = 0.6 * self._coverage_smooth + 0.4 * coverage_1280
-            cov = self._coverage_smooth
-            # Hedefe dogru yonel: goruntu ortasina gelene kadar don, sadece ileri hareket
-            error_x = cx_s - center_x
-            norm_err = max(-1.0, min(1.0, error_x / max(1.0, frame_size[0] / 2)))
-            deadband = 0.10
-            if abs(norm_err) < deadband:
-                norm_err = 0.0
-            turn_cmd = max(-10.0, min(10.0, -norm_err * 18.0))  # hedef saga ise negatif donus
-            desired_cov = 0.50
-            stop_cov = 0.60
-            backoff_cov = 0.70
-            if cov < desired_cov:
-                fwd_cmd = min(12.0, max(4.0, (desired_cov - cov) * 40.0))
-            elif cov >= backoff_cov:
-                fwd_cmd = -6.0  # cok yakinsa gerile
-            elif cov >= stop_cov:
-                fwd_cmd = 0.0
-            else:
-                fwd_cmd = 2.0  # tampon
-            # Asiri donmeyi engelle: ileri komuta gore donus limitini daralt
-            max_turn_by_fwd = max(6.0, abs(fwd_cmd) + 2.0)
-            turn_cmd = max(-max_turn_by_fwd, min(max_turn_by_fwd, turn_cmd))
-            if abs(norm_err) < 0.25:
-                turn_cmd *= 0.5
-            # Gripper burst aktifken arac sabit kalsin
-            if self.gripper_burst_until:
-                fwd_cmd = 0.0
-                turn_cmd = 0.0
-            # Yumuşak sürüş komutları (ani sıçramaları azalt)
-            self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
-            self._drive_fwd_smooth = 0.6 * self._drive_fwd_smooth + 0.4 * fwd_cmd
-            drive_turn = max(-12.0, min(12.0, self._drive_turn_smooth))
-            drive_fwd = max(-12.0, min(12.0, self._drive_fwd_smooth))
-            self._set_drive(turn=drive_turn, forward=drive_fwd)
-            LOGGER.debug(
-                "Auto takip: err=%.3f turn=%.1f fwd=%.1f coverage=%.3f",
-                norm_err,
-                drive_turn,
-                drive_fwd,
-                coverage_1280,
-            )
-            if (
-                coverage_1280 >= 0.60
-                and self.gripper_burst_until == 0.0
-                and self.gripper_reverse_until == 0.0
-                and now >= self.gripper_cooldown_until
-                and self._gripper_armed
-                and self.auto_detect_hits >= 2
-            ):
-                self.set_continuous_speed("gripper", 25.0)
-                self.gripper_burst_until = now + 5.0
-                self.gripper_cooldown_until = now + 7.0
-                LOGGER.info(
-                    "Auto: hedef alan buyuk, gripper +25%% 5sn (oran=%.3f, 1280x720 karsilik=%.3f)",
-                    mask_ratio,
-                    coverage_1280,
-                )
-
-            if self.auto_detect_hits >= 3:
-                self.last_target = (cx, cy, area, depth_norm, mask_ratio, best_color)
-                LOGGER.info("Auto: %s hedefi dogrulandi (takip devam).", best_color)
-                return
-            else:
-                return
-
-        # hic aday yok: eski hedefi sil ve gripper zamanlayicilarini yonet
-        self.last_target = None
-        self.last_target_color = None
-        self._drive_turn_smooth *= 0.5
-        self._drive_fwd_smooth *= 0.5
-        if self._target_was_visible:
-            # hedef cikti, ters yonde kisa sure calistir
-            if (
-                self.gripper_reverse_until == 0.0
-                and now - self._last_seen_time >= 1.0
-                and now >= self.gripper_cooldown_until
-            ):
-                self.set_continuous_speed("gripper", -25.0)
-                self.gripper_reverse_until = now + 3.0
-                self._target_was_visible = False
-                self.gripper_cooldown_until = now + 5.0
-                LOGGER.info("Auto: hedef gorunumden cikti, gripper -25%% 3sn")
-            # hedef kaybolduysa arac da duraklasin
-            if now - self._last_seen_time >= 1.0:
-                self.stop_wheels()
-        if self.gripper_reverse_until and now > self.gripper_reverse_until:
-            self.set_continuous_speed("gripper", 0.0)
-            self.gripper_reverse_until = 0.0
-            self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
-        if self.gripper_burst_until and now > self.gripper_burst_until:
-            self.set_continuous_speed("gripper", 0.0)
-            self.gripper_burst_until = 0.0
-            # hedef kaybolmadan sure bittiyse tekrar tetiklenmesin diye fired kalsin
-            self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
-        # Sadece gorunur hedef yokken ve hicbir aktif hareket yoksa eski hedef gorselini sil
-        if (
-            self.last_target
-            and self.auto_detect_hits == 0
-            and not self.gripper_burst_until
-            and not self.gripper_reverse_until
-            and now - self._last_seen_time > 2.0
-        ):
-            self.last_target = None
-            self.last_target_color = None
-        self.auto_detect_hits = 0
-        self.last_target_color = None
-
-        # Hedef yok: tarama mantigi
-        now = time.monotonic()
-        if self.auto_scan_completed:
+        if state == AutopilotState.IDLE:
             self.stop_all_motion()
-            return
-        INITIAL_WAIT = 3.0
-        ROTATE_DURATION = 0.5  # saniye, ~20-25° yaklasimi
-        HOLD_DURATION = 5.0
-        STEPS = 18  # tek tur (~360°)
-        TURN_SPEED = 30.0  # tarama için donus hizi (yumusak)
-
-        if not self.auto_scan_active:
-            # Taramadan once karede hedef yoksa bekle; varsa taramaya gerek yok
-            if self.last_target is None:
-                self.auto_scan_active = True
-                self.auto_scan_started_at = now
-                self.auto_scan_phase = "wait"
+            if best_target:
+                LOGGER.info("Auto: Target found while idle, switching to TRACKING.")
+                self.autopilot_state = AutopilotState.TRACKING
+            else:
+                LOGGER.info("Auto: No target, switching to SCANNING.")
+                self.autopilot_state = AutopilotState.SCANNING
+                self.auto_state_started_at = now
                 self.auto_scan_step = 0
+            return
+
+        if state == AutopilotState.SCANNING:
+            cfg = self.autopilot_config
+            if self.auto_scan_step == 0 and now - self.auto_state_started_at < cfg["scan_initial_wait"]:
+                # Initial wait before starting the scan
                 self.stop_all_motion()
-                LOGGER.info("Auto: tarama basladi, %ss bekleme.", INITIAL_WAIT)
                 return
+
+            if best_target:
+                LOGGER.info("Auto: Target found during scan, switching to TRACKING.")
+                self.stop_all_motion()
+                self._reset_autopilot() # Reset timers and smoothers
+                self.autopilot_state = AutopilotState.TRACKING
+                return
+
+            time_in_state = now - self.auto_state_started_at
+            
+            # Rotate -> Hold cycle
+            if time_in_state < cfg["scan_rotate_duration"]:
+                self._set_drive(turn=cfg["scan_turn_speed"], forward=0.0)
+            elif time_in_state < cfg["scan_rotate_duration"] + cfg["scan_hold_duration"]:
+                self.stop_wheels()
             else:
-                # Hedef zaten var; taramaya girmeden takip/ yaklaşma devam etsin
-                self.auto_scan_completed = True
+                # End of hold, start next step
+                self.auto_scan_step += 1
+                self.auto_state_started_at = now
+                if self.auto_scan_step >= cfg["scan_steps"]:
+                    LOGGER.warning("Auto: Scan completed, no target found. Switching to SEARCH_FAILED.")
+                    self.autopilot_state = AutopilotState.SEARCH_FAILED
+                    self.stop_all_motion()
+                else:
+                    LOGGER.info(f"Auto: Scan step {self.auto_scan_step}/{cfg['scan_steps']}.")
+            return
+
+        if state == AutopilotState.TRACKING:
+            if not best_target:
+                LOGGER.info("Auto: Target lost during tracking. Returning to IDLE.")
+                self.autopilot_state = AutopilotState.IDLE
+                self.stop_all_motion()
                 return
 
-        if self.auto_scan_phase == "wait":
-            self.stop_all_motion()
-            if now - self.auto_scan_started_at >= INITIAL_WAIT:
-                self.auto_scan_phase = "rotate"
-                self.auto_scan_started_at = now
-                LOGGER.info("Auto: bekleme bitti, taramaya donus basliyor (adim %s/8).", self.auto_scan_step + 1)
+            cx, cy, area, depth_norm, mask_ratio, color = best_target
+            
+            # Smooth the target position
+            alpha = 0.4
+            if self._cx_smooth == 0: self._cx_smooth = cx
+            else: self._cx_smooth = alpha * self._cx_smooth + (1 - alpha) * cx
+
+            center_x = frame_size[0] // 2
+            error_x = self._cx_smooth - center_x
+            norm_err = max(-1.0, min(1.0, error_x / (frame_size[0] / 2)))
+
+            # --- Motion control ---
+            cfg = self.autopilot_config
+            if abs(norm_err) < cfg["tracking_deadband"]:
+                norm_err = 0.0
+
+            turn_cmd = max(-cfg["tracking_turn_speed_max"], min(cfg["tracking_turn_speed_max"], -norm_err * cfg["tracking_turn_gain"]))
+            
+            # Forward/backward control based on area
+            frame_area = frame_size[0] * frame_size[1]
+            normalized_area = area / frame_area
+
+            fwd_cmd = 0.0
+            if normalized_area > cfg["backward_area_threshold"]:
+                fwd_cmd = cfg["backward_speed"]
+                LOGGER.info("Auto: Target too close, moving backward.")
+            elif normalized_area > cfg["stop_area_threshold"]:
+                fwd_cmd = 0.0
+                LOGGER.info("Auto: Target at stop distance, holding position.")
+                # Close enough to switch to the next state
+                self.autopilot_state = AutopilotState.APPROACHING
+                self.stop_wheels()
+                return
+            elif normalized_area < cfg["approach_area_threshold"]:
+                 fwd_cmd = min(cfg["tracking_forward_speed_max"], max(5.0, (cfg["approach_area_threshold"] - normalized_area) * cfg["tracking_forward_gain"]))
+
+            self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
+            self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
+            
+            self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
+            LOGGER.debug(f"Auto TRACKING: Target={color}, Area={normalized_area:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}")
             return
 
-        if self.auto_scan_phase == "rotate":
-            # 45°'lik kisa bir donus uygula
-            self._set_drive(turn=TURN_SPEED, forward=0.0)
-            if now - self.auto_scan_started_at >= ROTATE_DURATION:
-                self.auto_scan_phase = "hold"
-                self.auto_scan_started_at = now
-                self.stop_all_motion()
-                LOGGER.info("Auto: donus adimi tamamlandi, %ss bekleniyor.", HOLD_DURATION)
+        if state == AutopilotState.APPROACHING:
+            # Simplified: Stop and switch to Grasping. More advanced logic could go here.
+            LOGGER.info("Auto: Approached target. Switching to GRASPING.")
+            self.autopilot_state = AutopilotState.GRASPING
+            self.stop_all_motion()
+            return
+            
+        if state == AutopilotState.GRASPING:
+            # Simplified: Just trigger the grasp sequence and then go back to idle.
+            self._execute_grasp()
+            LOGGER.info("Auto: Grasp complete. Returning to IDLE.")
+            self.autopilot_state = AutopilotState.IDLE
             return
 
-        if self.auto_scan_phase == "hold":
+        if state == AutopilotState.SEARCH_FAILED:
+            # Do nothing, wait for a reset
             self.stop_all_motion()
-            if now - self.auto_scan_started_at >= HOLD_DURATION:
-                self.auto_scan_step += 1
-                if self.auto_scan_step >= STEPS:
-                    LOGGER.warning("Auto tarama: 360° donus tamamlandi, hedef bulunamadi.")
-                    self.stop_all_motion()
-                    self.auto_scan_active = False
-                    self.auto_scan_phase = "done"
-                    self.auto_scan_completed = True
-                    return
-                else:
-                    self.auto_scan_phase = "rotate"
-                    self.auto_scan_started_at = now
-                    LOGGER.info("Auto: bir sonraki 45° donuse geciliyor (adim %s/8).", self.auto_scan_step + 1)
             return
 
     def _set_drive(self, turn: float, forward: float) -> None:
