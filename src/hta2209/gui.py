@@ -25,6 +25,9 @@ from .controller import RobotController
 from . import detector
 
 LOGGER = logging.getLogger(__name__)
+LOGGER.setLevel(logging.INFO)
+# GUI log paneline controller loglarini aktaracak handler
+from .controller import GuiLogHandler
 
 THRESHOLD_FIELDS = (
     ("hue_min", 0, 179),
@@ -57,6 +60,13 @@ class HTAControlGUI:
         self.root.title("HTA2209 - Renk Bazli Mobil Manipulator")
         self.root.geometry("1000x700")
         self._updating = False
+        # Controller loglarini GUI paneline aktar
+        try:
+            handler = GuiLogHandler(self._append_log)
+            handler.setLevel(logging.INFO)
+            logging.getLogger("hta2209.controller").addHandler(handler)
+        except Exception:
+            pass
 
         self.status_var = tk.StringVar()
         self.mode_var = tk.StringVar(value=self.controller.mode)
@@ -253,11 +263,12 @@ class HTAControlGUI:
 
         ai_box = ttk.LabelFrame(frame, text="Yapay Zeka Kenar/Renk", padding=10)
         ai_box.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
-        ttk.Checkbutton(
+        self.ai_checkbox = ttk.Checkbutton(
             ai_box,
             text="AI destekli kenar + renk tespiti (kamera onizlemesinde)",
             variable=self.ai_detection_var,
-        ).pack(anchor="w", pady=(0, 5))
+        )
+        self.ai_checkbox.pack(anchor="w", pady=(0, 5))
         ttk.Label(ai_box, textvariable=self.ai_colors_var, wraplength=700, justify=tk.LEFT).pack(anchor="w")
         return frame
 
@@ -322,8 +333,8 @@ class HTAControlGUI:
     def _on_wheel_change(self, wheel: str, value: float) -> None:
         if self._updating:
             return
-        # Kullanici hareket verdiğinde stopped ise otomatik baslat
-        if not self.controller.is_running():
+        # Kullanici hareket verdiğinde yalnizca stopped ise otomatik baslat; paused ise kilitli kalsin
+        if (not self.controller.is_running()) and (not self.controller.is_paused()):
             try:
                 self.controller.set_run_state("started")
                 self.run_state_var.set(f"Durum: {self.controller.run_state}")
@@ -355,7 +366,7 @@ class HTAControlGUI:
             self._adjust_turn(-MANUAL_TURN_INCREMENT)
 
     def _adjust_drive(self, delta: float) -> None:
-        if not self.controller.is_running():
+        if (not self.controller.is_running()) and (not self.controller.is_paused()):
             try:
                 self.controller.set_run_state("started")
                 self.run_state_var.set(f"Durum: {self.controller.run_state}")
@@ -365,7 +376,7 @@ class HTAControlGUI:
         self._apply_drive_turn()
 
     def _adjust_turn(self, delta: float) -> None:
-        if not self.controller.is_running():
+        if (not self.controller.is_running()) and (not self.controller.is_paused()):
             try:
                 self.controller.set_run_state("started")
                 self.run_state_var.set(f"Durum: {self.controller.run_state}")
@@ -662,22 +673,44 @@ class HTAControlGUI:
         else:
             self.ai_colors_var.set("")
 
+        dominant_list = None
+        if self.ai_detection_var.get() and self.ai_colors_var.get():
+            names = self.ai_colors_var.get().replace("Dominant renkler:","").strip()
+            if names:
+                dominant_list = [n.strip() for n in names.split(",") if n.strip()]
+
         if not self.controller.is_manual():
             hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
-            self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
+            self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]), dominant_colors=dominant_list)
             if self.controller.last_target:
                 lt = self.controller.last_target
                 cx, cy, area = lt[0], lt[1], lt[2]
                 depth = lt[3] if len(lt) > 3 else None
-                cv2.circle(display_frame, (cx, cy), 8, (0, 255, 0), 2)
-                label = f"X={cx}, Y={cy}" if depth is None else f"X={cx}, Y={cy}, Z~{depth:.2f}"
+                mask_ratio = lt[4] if len(lt) > 4 else None
+                target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
+                color_map = {
+                    "red": (0, 0, 255),
+                    "green": (0, 255, 0),
+                    "blue": (255, 0, 0),
+                    "yellow": (0, 255, 255),
+                    "orange": (0, 165, 255),
+                    "purple": (255, 0, 255),
+                    "cyan": (255, 255, 0),
+                }
+                bgr = color_map.get(target_color or "yellow", (0, 255, 0))
+                cv2.circle(display_frame, (cx, cy), 8, bgr, 2)
+                label = f"X={cx}, Y={cy}"
+                if depth is not None:
+                    label += f", Z~{depth:.2f}"
+                if mask_ratio is not None:
+                    label += f", oran={mask_ratio:.2f}"
                 cv2.putText(
                     display_frame,
                     label,
                     (cx + 10, max(20, cy - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (0, 255, 0),
+                    bgr,
                     2,
                 )
             # Simulasyon modunda da PWM/matrixleri canlı görmek için yenile
@@ -722,22 +755,44 @@ class HTAControlGUI:
             else:
                 self.ai_colors_var.set("")
 
+            dominant_list = None
+            if self.ai_detection_var.get() and self.ai_colors_var.get():
+                names = self.ai_colors_var.get().replace("Dominant renkler:","").strip()
+                if names:
+                    dominant_list = [n.strip() for n in names.split(",") if n.strip()]
+
             if not self.controller.is_manual():
                 hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
-                self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
+                self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]), dominant_colors=dominant_list)
                 if self.controller.last_target:
                     lt = self.controller.last_target
                     cx, cy, area = lt[0], lt[1], lt[2]
                     depth = lt[3] if len(lt) > 3 else None
-                    cv2.circle(display_frame, (cx, cy), 8, (0, 255, 0), 2)
-                    label = f"X={cx}, Y={cy}" if depth is None else f"X={cx}, Y={cy}, Z~{depth:.2f}"
+                    mask_ratio = lt[4] if len(lt) > 4 else None
+                    target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
+                    color_map = {
+                        "red": (0, 0, 255),
+                        "green": (0, 255, 0),
+                        "blue": (255, 0, 0),
+                        "yellow": (0, 255, 255),
+                        "orange": (0, 165, 255),
+                        "purple": (255, 0, 255),
+                        "cyan": (255, 255, 0),
+                    }
+                    bgr = color_map.get(target_color or "yellow", (0, 255, 0))
+                    cv2.circle(display_frame, (cx, cy), 8, bgr, 2)
+                    label = f"X={cx}, Y={cy}"
+                    if depth is not None:
+                        label += f", Z~{depth:.2f}"
+                    if mask_ratio is not None:
+                        label += f", oran={mask_ratio:.2f}"
                     cv2.putText(
                         display_frame,
                         label,
                         (cx + 10, max(20, cy - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
-                        (0, 255, 0),
+                        bgr,
                         2,
                     )
                 self.refresh_from_controller()
@@ -793,22 +848,44 @@ class HTAControlGUI:
         else:
             self.ai_colors_var.set("")
 
+        dominant_list = None
+        if self.ai_detection_var.get() and self.ai_colors_var.get():
+            names = self.ai_colors_var.get().replace("Dominant renkler:","").strip()
+            if names:
+                dominant_list = [n.strip() for n in names.split(",") if n.strip()]
+
         if not self.controller.is_manual():
             hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
-            self.controller.autopilot_step(hsv, (display_frame.shape[1], display_frame.shape[0]))
+            self.controller.autopilot_step(hsv, (display_frame.shape[1], display_frame.shape[0]), dominant_colors=dominant_list)
             if self.controller.last_target:
                 lt = self.controller.last_target
                 cx, cy, area = lt[0], lt[1], lt[2]
                 depth = lt[3] if len(lt) > 3 else None
-                cv2.circle(display_frame, (cx, cy), 8, (0, 255, 0), 2)
-                label = f"X={cx}, Y={cy}" if depth is None else f"X={cx}, Y={cy}, Z~{depth:.2f}"
+                mask_ratio = lt[4] if len(lt) > 4 else None
+                target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
+                color_map = {
+                    "red": (0, 0, 255),
+                    "green": (0, 255, 0),
+                    "blue": (255, 0, 0),
+                    "yellow": (0, 255, 255),
+                    "orange": (0, 165, 255),
+                    "purple": (255, 0, 255),
+                    "cyan": (255, 255, 0),
+                }
+                bgr = color_map.get(target_color or "yellow", (0, 255, 0))
+                cv2.circle(display_frame, (cx, cy), 8, bgr, 2)
+                label = f"X={cx}, Y={cy}"
+                if depth is not None:
+                    label += f", Z~{depth:.2f}"
+                if mask_ratio is not None:
+                    label += f", oran={mask_ratio:.2f}"
                 cv2.putText(
                     display_frame,
                     label,
                     (cx + 10, max(20, cy - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    (0, 255, 0),
+                    bgr,
                     2,
                 )
             self.refresh_from_controller()
@@ -884,17 +961,43 @@ class HTAControlGUI:
     def _append_log(self, text: str) -> None:
         if not hasattr(self, "log_output") or self.log_output is None:
             return
-        self.log_output.configure(state="normal")
         self.log_output.insert(tk.END, text + "\n")
         self.log_output.see(tk.END)
-        self.log_output.configure(state="disabled")
+        # Ayrica logging'e de yaz
+        try:
+            LOGGER.info(text)
+        except Exception:
+            pass
 
     def _clear_log(self) -> None:
         if not hasattr(self, "log_output") or self.log_output is None:
             return
-        self.log_output.configure(state="normal")
         self.log_output.delete("1.0", tk.END)
-        self.log_output.configure(state="disabled")
+
+    def _copy_log_selection(self, event=None):
+        if not hasattr(self, "log_output") or self.log_output is None:
+            return "break"
+        try:
+            text = self.log_output.get("sel.first", "sel.last")
+        except tk.TclError:
+            text = self.log_output.get("1.0", tk.END)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        return "break"
+
+    def _show_log_menu(self, event) -> None:
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="Kopyala", command=lambda: self._copy_log_selection())
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _block_log_edit(self, event) -> str | None:
+        # Klavye ile duzenlemeyi engelle; sadece kopyaya izin ver
+        if event.keysym.lower() == "c" and (event.state & 0x4 or event.state & 0x100000):
+            return None
+        return "break"
 
     # ------------------------------------------------------------------ #
     def _create_sidebar(self, parent: ttk.Frame) -> None:
@@ -937,12 +1040,12 @@ class HTAControlGUI:
 
         color_frame = ttk.Frame(settings)
         color_frame.pack(fill=tk.X, pady=(5, 5))
-        ttk.Label(color_frame, text="Auto hedef rengi:").pack(side=tk.LEFT)
+        ttk.Label(color_frame, text="Auto hedef rengi (kilitli: sari/kirmizi):").pack(side=tk.LEFT)
         color_combo = ttk.Combobox(
             color_frame,
             values=list(self.controller.colors()),
             textvariable=self.target_color_var,
-            state="readonly",
+            state="disabled",
             width=10,
         )
         color_combo.pack(side=tk.LEFT, padx=5)
@@ -1012,8 +1115,13 @@ class HTAControlGUI:
         log_frame.pack(fill=tk.BOTH, expand=True)
         log_frame.columnconfigure(0, weight=1)
         log_frame.rowconfigure(0, weight=1)
-        self.log_output = scrolledtext.ScrolledText(log_frame, height=6, state="disabled", wrap="word")
+        self.log_output = scrolledtext.ScrolledText(log_frame, height=6, state="normal", wrap="word")
         self.log_output.grid(row=0, column=0, sticky="nsew")
+        # Kopyalama / menü / düzenleme engeli
+        self.log_output.bind("<Control-c>", self._copy_log_selection)
+        self.log_output.bind("<Command-c>", self._copy_log_selection)  # macOS
+        self.log_output.bind("<Button-3>", self._show_log_menu)
+        self.log_output.bind("<Key>", self._block_log_edit)
         ttk.Button(log_frame, text="Temizle", command=self._clear_log).grid(row=0, column=1, padx=5, pady=2, sticky="ns")
 
     # ------------------------------------------------------------------ #
@@ -1060,8 +1168,18 @@ class HTAControlGUI:
             return
         if selected == "auto":
             self._reset_manual_motion()
+            # Auto modda AI destekli tespit otomatik acilsin
+            self.ai_detection_var.set(True)
+            try:
+                self.ai_checkbox.state(["disabled"])
+            except Exception:
+                pass
         else:
             self.refresh_from_controller()
+            try:
+                self.ai_checkbox.state(["!disabled"])
+            except Exception:
+                pass
         self.controller.auto_target_color = self.target_color_var.get()
         self._append_log(f"Mod {self.controller.mode} olarak ayarlandi")
 

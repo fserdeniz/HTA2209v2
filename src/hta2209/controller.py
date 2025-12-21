@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 import logging
+import atexit
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Tuple, Optional
@@ -59,6 +61,21 @@ DEFAULT_L298N_PINS = {
 
 SUPPORTED_MODES = ("manual", "auto")
 DEFAULT_COLORS = ("red", "green", "blue", "yellow", "orange", "purple", "cyan")
+
+
+class GuiLogHandler(logging.Handler):
+    """Redirect controller logs to GUI via callback."""
+
+    def __init__(self, callback):
+        super().__init__()
+        self.callback = callback
+
+    def emit(self, record) -> None:  # pragma: no cover
+        try:
+            msg = self.format(record)
+            self.callback(msg)
+        except Exception:
+            pass
 
 
 @dataclass
@@ -131,15 +148,32 @@ class RobotController:
         self.simulation_enabled: bool = False
         self.run_state: str = "stopped"  # started, paused, stopped
         self.last_target: Optional[Tuple[int, int, int]] = None  # (cx, cy, area)
+        self.last_target_color: Optional[str] = None
+        # Auto tarama durumu
+        self.auto_scan_active: bool = False
+        self.auto_scan_started_at: float = 0.0
+        self.auto_scan_step: int = 0
+        self.auto_scan_phase: str = "idle"  # idle | wait | rotate | hold | done
+        self.auto_detect_hits: int = 0
         self.supply_voltage: float = 5.0
         self.supply_current: float = 0.0
         self.power_consumption_w: float = 0.0
         self.pwm_frequency_hz: float = 50.0
         self.pwm_output: Dict[str, float] = {wheel: 0.0 for wheel in WHEEL_CHANNELS}
+        self.gripper_burst_until: float = 0.0
+        self.gripper_reverse_until: float = 0.0
+        self._target_was_visible: bool = False
+        self._gripper_fired: bool = False
+        self.gripper_cooldown_until: float = 0.0
+        self._last_auto_calib: float = 0.0
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
         self.load_config()
         self._connect_to_hardware()
+        # Donanim geldikten sonra tum cikislari sifirla
+        self.stop_all_motion()
+        # Uygulama kapanirken PWM'leri sifirla
+        atexit.register(self.cleanup)
         # Donanim geldikten sonra mevcut eklem acilarini uygula
         if self.hardware_ready and not self.is_simulation():
             for joint, val in self.arm_state.items():
@@ -166,6 +200,12 @@ class RobotController:
             # Standard analog servolar icin güvenli darbe araligi ve frekans
             try:
                 self.kit.frequency = 50
+                # Baslangicta tum kanallari sifirla (onceki seanslardan kalan PWM'leri temizle)
+                try:
+                    for ch in range(self.channels):
+                        self.kit._pca.channels[ch].duty_cycle = 0  # type: ignore[attr-defined]
+                except Exception:
+                    pass
                 for joint, ch in self.servo_channels.items():
                     try:
                         if joint in self.continuous_joints:
@@ -264,6 +304,13 @@ class RobotController:
 
         def drive_side(speed: float, pwm, pin_a: int, pin_b: int, side_name: str, invert: bool = False) -> None:
             duty = max(-100.0, min(100.0, speed))
+            if abs(duty) < 1e-3:
+                # Tamamen durdur: her iki pin LOW, PWM 0
+                GPIO.output(pin_a, GPIO.LOW)
+                GPIO.output(pin_b, GPIO.LOW)
+                pwm.ChangeDutyCycle(0)
+                LOGGER.info("L298N %s duty 0 -> pins (%s=0, %s=0)", side_name, pin_a, pin_b)
+                return
             if duty >= 0:
                 GPIO.output(pin_a, GPIO.LOW if invert else GPIO.HIGH)
                 GPIO.output(pin_b, GPIO.HIGH if invert else GPIO.LOW)
@@ -327,7 +374,11 @@ class RobotController:
                 self.kit._pca.channels[channel].duty_cycle = 0  # type: ignore[attr-defined]
                 return
             servo = self.kit.continuous_servo[channel]
-            servo.throttle = speed / 100.0
+            if speed == 0:
+                # Stop komutu: duty'yi 0'a cek, serbest birak
+                self.kit._pca.channels[channel].duty_cycle = 0  # type: ignore[attr-defined]
+            else:
+                servo.throttle = speed / 100.0
         except Exception as exc:
             LOGGER.error("Continuous eklem %s icin throttle ayarlanamadi: %s", joint, exc)
 
@@ -467,6 +518,7 @@ class RobotController:
         LOGGER.info("Kontrol modu %s olarak ayarlandi.", normalized)
         self.stop_all_motion()
         self.auto_grasped = False
+        self._reset_auto_scan()
 
     def is_manual(self) -> bool:
         return self.mode == "manual"
@@ -488,6 +540,7 @@ class RobotController:
         self.run_state = normalized
         if normalized in ("paused", "stopped"):
             self.stop_all_motion()
+            self._reset_auto_scan()
         if normalized == "stopped":
             self.auto_grasped = False
         LOGGER.info("Calisma durumu %s olarak ayarlandi.", normalized)
@@ -502,7 +555,22 @@ class RobotController:
         self.stop_wheels()
         for joint in self.continuous_joints:
             self.set_continuous_speed(joint, 0)
+        self.gripper_burst_until = 0.0
+        self.gripper_reverse_until = 0.0
+        self._target_was_visible = False
+        self._gripper_fired = False
+        self.gripper_cooldown_until = 0.0
+        self._last_auto_calib = 0.0
         self._recompute_power()
+        # otomatik tarama sirasinda baslatilan hareketleri de temizle
+        if self.hbridge_ready and GPIO is not None:
+            try:
+                GPIO.output(self.l298n_pins["in1"], GPIO.LOW)
+                GPIO.output(self.l298n_pins["in2"], GPIO.LOW)
+                GPIO.output(self.l298n_pins["in3"], GPIO.LOW)
+                GPIO.output(self.l298n_pins["in4"], GPIO.LOW)
+            except Exception:
+                pass
 
     def cleanup(self) -> None:
         """PWM'leri kapat, GPIO'yu temizle."""
@@ -510,6 +578,16 @@ class RobotController:
             self.stop_all_motion()
         except Exception:
             pass
+        # PCA9685 tum kanallari sifirla
+        if self.kit:
+            try:
+                for ch in range(self.channels):
+                    try:
+                        self.kit._pca.channels[ch].duty_cycle = 0  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         if self._ena_pwm:
             try:
                 self._ena_pwm.stop()
@@ -539,14 +617,16 @@ class RobotController:
             return
         sat = hsv_frame[:, :, 1].astype(np.float32).ravel()
         val = hsv_frame[:, :, 2].astype(np.float32).ravel()
-        sat_min = int(np.percentile(sat, low_pct))
-        sat_max = int(np.percentile(sat, high_pct))
-        val_min = int(np.percentile(val, low_pct))
-        val_max = int(np.percentile(val, high_pct))
-        sat_min = max(0, min(255, sat_min))
-        sat_max = max(0, min(255, sat_max))
-        val_min = max(0, min(255, val_min))
-        val_max = max(0, min(255, val_max))
+        # Ortam aydinligina gore (V ortalama / std) min-max belirle
+        v_mean = float(np.mean(val))
+        v_std = float(np.std(val))
+        val_min = int(max(5, min(255, v_mean - 1.5 * v_std)))
+        val_max = int(max(val_min + 10, min(255, v_mean + 1.5 * v_std)))
+        # Doygunluk icin yuzdelik aralik
+        sat_min = int(np.percentile(sat, 20.0))
+        sat_max = int(np.percentile(sat, 98.0))
+        sat_min = max(10, min(255, sat_min))
+        sat_max = max(sat_min + 10, min(255, sat_max))
         for thr in self.color_thresholds.values():
             thr.sat_min = sat_min
             thr.sat_max = sat_max
@@ -554,18 +634,48 @@ class RobotController:
             thr.val_max = val_max
             thr.clamp()
         LOGGER.debug(
-            "Auto threshold applied: sat [%s-%s], val [%s-%s]",
+            "Auto threshold (ambient) sat [%s-%s], val [%s-%s], Vmean=%.1f std=%.1f",
             sat_min,
             sat_max,
             val_min,
             val_max,
+            v_mean,
+            v_std,
         )
 
     # ------------------------------------------------------------------ #
     # Autopilot (color approach + grasp)
     # ------------------------------------------------------------------ #
-    def _mask_target(self, hsv_frame: np.ndarray) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, float]]]:
-        thr = self.color_thresholds.get(self.auto_target_color)
+    def _mask_target(self, hsv_frame: np.ndarray, color: str) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, float, float, str]]]:
+        """Return mask and largest contour info for given color."""
+
+        def find_contour(mask_img: np.ndarray) -> Optional[Tuple[np.ndarray, Tuple[int, int, int, float, float, str]]]:
+            contours, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                return None
+            largest = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest)
+            # Kucuk hedefler icin limitleri dusur: en az %0.5 alan veya 800 piksel
+            min_area = max(800.0, mask_img.shape[0] * mask_img.shape[1] * 0.005)
+            if area < min_area:
+                return None
+            mask_ratio = float(cv2.countNonZero(mask_img)) / float(mask_img.shape[0] * mask_img.shape[1])
+            # Maske orani cok dusukse ele (min %1)
+            if mask_ratio < 0.01:
+                return None
+            M = cv2.moments(largest)
+            if M["m00"] == 0:
+                x, y, w, h = cv2.boundingRect(largest)
+                cx = int(x + w / 2)
+                cy = int(y + h / 2)
+            else:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+            depth_norm = 1.0 / max(1.0, min(area, mask_img.shape[0] * mask_img.shape[1]))
+            depth_norm = max(0.0, min(1.0, depth_norm * 1000))
+            return mask_img, (cx, cy, int(area), depth_norm, float(mask_ratio), color)
+
+        thr = self.color_thresholds.get(color)
         if thr is None:
             return np.zeros(hsv_frame.shape[:2], dtype=np.uint8), None
         lower = np.array([thr.hue_min, thr.sat_min, thr.val_min], dtype=np.uint8)
@@ -576,26 +686,10 @@ class RobotController:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return mask, None
-        largest = max(contours, key=cv2.contourArea)
-        area = cv2.contourArea(largest)
-        min_area = max(150.0, mask.shape[0] * mask.shape[1] * 0.002)
-        if area < min_area:
-            return mask, None
-        M = cv2.moments(largest)
-        if M["m00"] == 0:
-            x, y, w, h = cv2.boundingRect(largest)
-            cx = int(x + w / 2)
-            cy = int(y + h / 2)
-        else:
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-        # Basit derinlik tahmini: normalize alan tersine orantili (0-1 arasi)
-        depth_norm = 1.0 / max(1.0, min(area, mask.shape[0] * mask.shape[1]))
-        depth_norm = max(0.0, min(1.0, depth_norm * 1000))  # basit ölçekleme
-        return mask, (cx, cy, int(area), depth_norm)
+        result = find_contour(mask)
+        if result:
+            return result
+        return mask, None
 
     def _aim_arm(self, target: Tuple[int, int, int, float], frame_size: Tuple[int, int]) -> None:
         """
@@ -612,51 +706,222 @@ class RobotController:
         joint_target = 90 + norm_error * 60  # ±60 deg
         self.set_joint_angle("joint", joint_target)
 
-    def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> None:
+    def _reset_auto_scan(self) -> None:
+        self.auto_scan_active = False
+        self.auto_scan_started_at = 0.0
+        self.auto_scan_step = 0
+        self.auto_scan_phase = "idle"
+        self.auto_detect_hits = 0
+        self.last_target = None
+        self.gripper_burst_until = 0.0
+        self.gripper_reverse_until = 0.0
+        self._target_was_visible = False
+
+    def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int], dominant_colors: Optional[list[str]] = None) -> None:
         """
-        Basic color-follow and grasp routine.
-        - Rotate/drive to search if no target.
-        - Aim arm joints toward target; keep tracking even in simulation.
-        - Approach when target centered.
-        - Trigger grasp when close enough (area threshold).
+        Auto mod: ilk 10 sn bekle, hedef yoksa 45° adimlarla 360° tarama.
+        Her adim arasi 5 sn bekle; bulunmazsa uyar.
         """
         if self.is_manual() or not self.is_running():
             return
-        width, height = frame_size
-        mask, target = self._mask_target(hsv_frame)
-        if target and self.last_target:
-            prev_cx, prev_cy, _, prev_depth = self.last_target
-            cx, cy, area, depth = target
-            cx = int(0.6 * prev_cx + 0.4 * cx)
-            cy = int(0.6 * prev_cy + 0.4 * cy)
-            depth = 0.6 * prev_depth + 0.4 * depth
-            target = (cx, cy, area, depth)
-        self.last_target = target
-        if target is None:
-            # search: slow rotate left
-            self._set_drive(turn=20.0, forward=0.0)
+        now = time.monotonic()
+
+        # Gecerli kare yoksa hicbir sey yapma
+        if hsv_frame is None or hsv_frame.size == 0:
+            LOGGER.debug("Auto: bos kare, tarama adimi yapilmadi.")
             return
 
-        cx, cy, area, _depth = target
-        center_x = width // 2
-        error_x = cx - center_x
-        turn = -error_x * 0.1  # simple P controller
-        turn = max(-50.0, min(50.0, turn))
+        # Auto modda periyodik renk kalibrasyonu (her 5 sn)
+        if self.auto_threshold_enabled and now - self._last_auto_calib >= 5.0:
+            self.auto_calibrate_from_frame(hsv_frame)
+            self._last_auto_calib = now
+            LOGGER.debug("Auto: periyodik renk kalibrasyonu uygulandi.")
 
-        # Aim the arm toward the target based on camera position
-        self._aim_arm(target, (width, height))
+        allowed_colors = ("yellow", "red")
+        if dominant_colors:
+            hit_count = sum(1 for c in dominant_colors if c in allowed_colors)
+            if (
+                hit_count >= 2
+                and self.gripper_burst_until == 0.0
+                and self.gripper_reverse_until == 0.0
+                and now >= self.gripper_cooldown_until
+                and not self._gripper_fired
+            ):
+                self.set_continuous_speed("gripper", 25.0)
+                self.gripper_burst_until = now + 5.0
+                self._gripper_fired = True
+                self.gripper_cooldown_until = now + 7.0
+                LOGGER.info("Auto: dominant renkler %s (>=2 hedef), gripper +25%% 3sn", dominant_colors)
 
-        # Forward speed based on area (smaller area => further)
-        if area < 5000:
-            forward = 40.0
-        elif area < 15000:
-            forward = 25.0
-        else:
-            forward = 0.0
-            if not self.auto_grasped:
-                self._execute_grasp()
-                self.auto_grasped = True
-        self._set_drive(turn=turn, forward=forward)
+        # En iyi adayi bul
+        best_target = None
+        best_color = None
+        for color in allowed_colors:
+            if dominant_colors is not None and color not in dominant_colors:
+                LOGGER.debug("Auto: dominant listede %s yok, atlandi.", color)
+                continue
+            _mask, candidate = self._mask_target(hsv_frame, color)
+            if candidate is None:
+                continue
+            if best_target is None or candidate[2] > best_target[2]:
+                best_target = candidate
+                best_color = color
+
+        if best_target is not None:
+            # Aktif burst/reverse suresi dolduysa durdur
+            if self.gripper_burst_until and now > self.gripper_burst_until:
+                self.set_continuous_speed("gripper", 0.0)
+                self.gripper_burst_until = 0.0
+                self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
+                # aynı hedef icin yeniden firlatilmasin diye fired bayragi kalsin
+            if self.gripper_reverse_until and now > self.gripper_reverse_until:
+                self.set_continuous_speed("gripper", 0.0)
+                self.gripper_reverse_until = 0.0
+                self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
+
+            cx, cy, area, depth_norm, mask_ratio, _color = best_target
+            # Ayni renkte ardil tespitleri say
+            if best_color != self.last_target_color:
+                self.auto_detect_hits = 0
+            self.last_target_color = best_color
+            self.auto_detect_hits += 1
+            self._target_was_visible = True
+            LOGGER.info(
+                "Auto: aday (%s) hit %s/5 alan=%d oran=%.3f",
+                best_color,
+                self.auto_detect_hits,
+                area,
+                mask_ratio,
+            )
+            # Buyuk hedefse gripper tetikle
+            frame_area = max(1, int(frame_size[0] * frame_size[1]))
+            target_area = 1280 * 720
+            coverage_1280 = mask_ratio * (frame_area / target_area)
+            # Hedefe dogru yonel: goruntu ortasina gelene kadar don, hedef yakinsa ileri hiz dusur
+            center_x = frame_size[0] // 2
+            error_x = cx - center_x
+            norm_err = max(-1.0, min(1.0, error_x / max(1.0, frame_size[0] / 2)))
+            turn_cmd = max(-25.0, min(25.0, -norm_err * 45.0))  # hedef saga ise negatif donus
+            desired_cov = 0.32
+            fwd_cmd = (desired_cov - coverage_1280) * 140.0
+            # Güvenli sınırlar: ileri maks 50, geri maks -25
+            fwd_cmd = max(-25.0, min(50.0, fwd_cmd))
+            # Hedef çok yakınsa hafif geri çekil
+            if coverage_1280 >= 0.60:
+                fwd_cmd = -20.0
+            # Hedef teyidi yoksa (hit<2) ileri/geri yapma, sadece yönlen
+            if self.auto_detect_hits < 2:
+                fwd_cmd = 0.0
+            # Gripper burst aktifken arac sabit kalsin
+            if self.gripper_burst_until:
+                fwd_cmd = 0.0
+                turn_cmd = 0.0
+            self._set_drive(turn=turn_cmd, forward=fwd_cmd)
+            LOGGER.debug(
+                "Auto takip: err=%.3f turn=%.1f fwd=%.1f coverage=%.3f",
+                norm_err,
+                turn_cmd,
+                fwd_cmd,
+                coverage_1280,
+            )
+            if (
+                coverage_1280 >= 0.60
+                and self.gripper_burst_until == 0.0
+                and self.gripper_reverse_until == 0.0
+                and now >= self.gripper_cooldown_until
+                and not self._gripper_fired
+            ):
+                self.set_continuous_speed("gripper", 25.0)
+                self.gripper_burst_until = now + 5.0
+                self._gripper_fired = True
+                self.gripper_cooldown_until = now + 7.0
+                LOGGER.info(
+                    "Auto: hedef alan buyuk, gripper +25%% 5sn (oran=%.3f, 1280x720 karsilik=%.3f)",
+                    mask_ratio,
+                    coverage_1280,
+                )
+
+            if self.auto_detect_hits >= 5:
+                self.last_target = best_target
+                LOGGER.info("Auto: %s hedefi dogrulandi (takip devam).", best_color)
+                return
+            else:
+                return
+
+        # hic aday yok: gripper zamanlayicilarini yonet
+        if self._target_was_visible:
+            # hedef cikti, ters yonde kisa sure calistir
+            if self.gripper_reverse_until == 0.0 and now >= self.gripper_cooldown_until:
+                self.set_continuous_speed("gripper", -25.0)
+                self.gripper_reverse_until = now + 3.0
+                self._target_was_visible = False
+                self._gripper_fired = False
+                self.gripper_cooldown_until = now + 5.0
+                LOGGER.info("Auto: hedef gorunumden cikti, gripper -25%% 3sn")
+            # hedef kaybolduysa arac da duraklasin
+            self.stop_wheels()
+        if self.gripper_reverse_until and now > self.gripper_reverse_until:
+            self.set_continuous_speed("gripper", 0.0)
+            self.gripper_reverse_until = 0.0
+            self._gripper_fired = False
+            self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
+        if self.gripper_burst_until and now > self.gripper_burst_until:
+            self.set_continuous_speed("gripper", 0.0)
+            self.gripper_burst_until = 0.0
+            # hedef kaybolmadan sure bittiyse tekrar tetiklenmesin diye fired kalsin
+            self.gripper_cooldown_until = max(self.gripper_cooldown_until, now + 2.0)
+        self.auto_detect_hits = 0
+        self.last_target_color = None
+
+        # Hedef yok: tarama mantigi
+        now = time.monotonic()
+        INITIAL_WAIT = 10.0
+        ROTATE_DURATION = 1.0  # saniye, ~45° yaklasimi
+        HOLD_DURATION = 5.0
+        STEPS = 8
+        TURN_SPEED = 40.0  # tarama için donus hizi
+
+        if not self.auto_scan_active:
+            self.auto_scan_active = True
+            self.auto_scan_started_at = now
+            self.auto_scan_phase = "wait"
+            self.auto_scan_step = 0
+            self.stop_all_motion()
+            LOGGER.info("Auto: tarama basladi, %ss bekleme.", INITIAL_WAIT)
+            return
+
+        if self.auto_scan_phase == "wait":
+            self.stop_all_motion()
+            if now - self.auto_scan_started_at >= INITIAL_WAIT:
+                self.auto_scan_phase = "rotate"
+                self.auto_scan_started_at = now
+                LOGGER.info("Auto: bekleme bitti, taramaya donus basliyor (adim %s/8).", self.auto_scan_step + 1)
+            return
+
+        if self.auto_scan_phase == "rotate":
+            # 45°'lik kisa bir donus uygula
+            self._set_drive(turn=TURN_SPEED, forward=0.0)
+            if now - self.auto_scan_started_at >= ROTATE_DURATION:
+                self.auto_scan_phase = "hold"
+                self.auto_scan_started_at = now
+                self.stop_all_motion()
+                LOGGER.info("Auto: donus adimi tamamlandi, %ss bekleniyor.", HOLD_DURATION)
+            return
+
+        if self.auto_scan_phase == "hold":
+            self.stop_all_motion()
+            if now - self.auto_scan_started_at >= HOLD_DURATION:
+                self.auto_scan_step += 1
+                if self.auto_scan_step >= STEPS:
+                    LOGGER.warning("Auto tarama: 360° donus tamamlandi, hedef bulunamadi.")
+                    self.stop_all_motion()
+                    self._reset_auto_scan()
+                    return
+                else:
+                    self.auto_scan_phase = "rotate"
+                    self.auto_scan_started_at = now
+                    LOGGER.info("Auto: bir sonraki 45° donuse geciliyor (adim %s/8).", self.auto_scan_step + 1)
+            return
 
     def _set_drive(self, turn: float, forward: float) -> None:
         # simple differential mix

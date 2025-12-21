@@ -1,9 +1,9 @@
 {
   "mode": "manual",
-  "simulation": true,
+  "simulation": false,
   "run_state": "started",
   "auto_threshold": true,
-  "auto_target_color": "yellow",
+  "auto_target_color": "red",
   "wheel_polarity": {
     "front_left": 1,
     "front_right": 1,
@@ -17,8 +17,8 @@
     "rear_right": 0.0
   },
   "arm": {
-    "joint": 110.32876712328768,
-    "gripper": 0.0
+    "joint": 128.14814814814815,
+    "gripper": 4.529616724738683
   },
   "servo_channels": {
     "joint": 0,
@@ -27,59 +27,59 @@
   "thresholds": {
     "red": {
       "hue_min": 0,
-      "hue_max": 30,
-      "sat_min": 15,
-      "sat_max": 212,
-      "val_min": 16,
-      "val_max": 154
+      "hue_max": 15,
+      "sat_min": 14,
+      "sat_max": 164,
+      "val_min": 83,
+      "val_max": 192
     },
     "green": {
-      "hue_min": 0,
-      "hue_max": 30,
-      "sat_min": 15,
-      "sat_max": 212,
-      "val_min": 16,
-      "val_max": 154
+      "hue_min": 45,
+      "hue_max": 90,
+      "sat_min": 14,
+      "sat_max": 164,
+      "val_min": 83,
+      "val_max": 192
     },
     "blue": {
-      "hue_min": 0,
-      "hue_max": 30,
-      "sat_min": 15,
-      "sat_max": 212,
-      "val_min": 16,
-      "val_max": 154
+      "hue_min": 100,
+      "hue_max": 140,
+      "sat_min": 14,
+      "sat_max": 164,
+      "val_min": 83,
+      "val_max": 192
     },
     "yellow": {
       "hue_min": 20,
       "hue_max": 40,
-      "sat_min": 15,
-      "sat_max": 212,
-      "val_min": 16,
-      "val_max": 154
+      "sat_min": 14,
+      "sat_max": 164,
+      "val_min": 83,
+      "val_max": 192
     },
     "orange": {
       "hue_min": 5,
       "hue_max": 25,
-      "sat_min": 15,
-      "sat_max": 212,
-      "val_min": 16,
-      "val_max": 154
+      "sat_min": 14,
+      "sat_max": 164,
+      "val_min": 83,
+      "val_max": 192
     },
     "purple": {
       "hue_min": 130,
       "hue_max": 165,
-      "sat_min": 15,
-      "sat_max": 212,
-      "val_min": 16,
-      "val_max": 154
+      "sat_min": 14,
+      "sat_max": 164,
+      "val_min": 83,
+      "val_max": 192
     },
     "cyan": {
       "hue_min": 80,
       "hue_max": 100,
-      "sat_min": 15,
-      "sat_max": 212,
-      "val_min": 16,
-      "val_max": 154
+      "sat_min": 14,
+      "sat_max": 164,
+      "val_min": 83,
+      "val_max": 192
     }
   }
 }
