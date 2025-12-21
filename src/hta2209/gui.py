@@ -79,6 +79,7 @@ class HTAControlGUI:
         self.picam: Picamera2 | None = None
         self._ensure_picamera2()
 
+        # Bu sistemde yalnızca CSI portundaki Picamera2 kullanılacak
         self.source_type_var = tk.StringVar(value="picam")
         self.camera_index_var = tk.IntVar(value=0)
         self.camera_choice_var = tk.StringVar(value="")
@@ -567,19 +568,21 @@ class HTAControlGUI:
         return has_capture
 
     def _refresh_camera_devices(self) -> None:
-        # Yalnızca Picamera2 kullanılıyor; V4L2 taraması yapılmıyor.
+        # Yalnızca Picamera2 destekleniyor; USB taraması yapılmaz.
         self._camera_devices = []
-        self.camera_choice_var.set("Picamera2")
+        if self.picam_supported:
+            self.camera_choice_var.set("Picamera2")
+            self.camera_status_var.set("Picamera2 hazir")
+        else:
+            self.camera_choice_var.set("Picamera2 bulunamadi")
+            self.camera_status_var.set("Picamera2 bulunamadi")
         self._update_camera_combo()
 
     def _update_camera_combo(self) -> None:
+        # Picamera2 haric kaynak yok; combobox kullanılmıyor.
         if self.camera_combo is None:
             return
-        values = [self._format_camera_label(idx, name) for idx, name in self._camera_devices]
-        self.camera_combo["values"] = values
-        if not values:
-            self.camera_choice_var.set("Picamera2")
-            self.camera_status_var.set("Kamera bulunamadi")
+        self.camera_combo["values"] = []
 
     def _on_camera_choice(self, _event=None) -> None:
         choice = self.camera_choice_var.get()
@@ -592,21 +595,29 @@ class HTAControlGUI:
 
     def _start_stream(self) -> None:
         self._stop_stream()
+        self._auto_frame_counter = 0
+
+        # Yalnızca Picamera2 kullanılacak
+        if not self.picam_supported:
+            self.camera_status_var.set("Picamera2 bulunamadı; yalnızca CSI destekleniyor.")
+            messagebox.showerror("Kamera", "Picamera2 modulu bulunamadı veya yüklenemedi.")
+            return
         try:
             if self.picam is None:
                 self.picam = Picamera2()
             config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
             self.picam.configure(config)
             self.picam.start()
-        except Exception as exc:
-            self.camera_status_var.set(f"Picamera2 acilamadi: {exc}")
-            messagebox.showerror("Kamera", f"Picamera2 acilamadi: {exc}")
+            self.source_type_var.set("picam")
+            self.camera_running = True
+            self._camera_failures = 0
+            self._current_camera_index = None
+            self.camera_status_var.set("Kamera açık (Picamera2 1280x720)")
+            self._update_picam_frame()
             return
-        self.camera_running = True
-        self._camera_failures = 0
-        self._current_camera_index = None
-        self.camera_status_var.set("Kamera acik (Picamera2 1280x720)")
-        self._update_picam_frame()
+        except Exception as exc:
+            self.camera_status_var.set(f"Picamera2 açılamadı: {exc}")
+            messagebox.showerror("Kamera", f"Picamera2 açılamadı: {exc}")
 
     def _stop_stream(self) -> None:
         self.camera_running = False
@@ -1054,10 +1065,10 @@ class HTAControlGUI:
         ttk.Button(settings, text="Kaydet", command=self._save_state).pack(fill=tk.X, pady=2)
         ttk.Button(settings, text="Yeniden Yukle", command=self._reload_state).pack(fill=tk.X, pady=2)
 
-        cam_box = ttk.LabelFrame(sidebar, text="Kamera Kontrolu (Sadece CSI/Picamera2)", padding=10)
+        cam_box = ttk.LabelFrame(sidebar, text="Kamera Kontrolu (Picamera2 - CSI)", padding=10)
         cam_box.pack(fill=tk.X, pady=(0, 10))
         row = 0
-        ttk.Label(cam_box, text="Kaynak: Raspberry Pi Camera Module 3 (Picamera2)").grid(
+        ttk.Label(cam_box, text="Kaynak: Raspberry Pi Camera Module v3 (Picamera2)").grid(
             row=row, column=0, columnspan=4, sticky="w"
         )
         row += 1
@@ -1065,8 +1076,6 @@ class HTAControlGUI:
         ttk.Button(cam_box, text="Baslat", command=self._start_stream).grid(row=row, column=0, columnspan=2, padx=5, pady=2, sticky="ew")
         ttk.Button(cam_box, text="Durdur", command=self._stop_stream).grid(row=row, column=2, columnspan=2, padx=5, pady=2, sticky="ew")
         row += 1
-
-        ttk.Label(cam_box, textvariable=self.camera_status_var).grid(row=row, column=0, columnspan=4, sticky="w")
 
         ttk.Label(cam_box, textvariable=self.camera_status_var).grid(row=row, column=0, columnspan=4, sticky="w")
 
@@ -1212,7 +1221,10 @@ class HTAControlGUI:
         return [cv2.CAP_V4L2, cv2.CAP_ANY]
 
     def _check_camera_available(self, index: int) -> bool:
-        # Kamera mevcudiyetini hızlı liste kontrolüyle sınırla; açma/okuma denemesi yapma (timeout engeli).
+        cap = self._open_camera_capture(index)
+        if cap is None:
+            return False
+        cap.release()
         return True
 
     def _open_camera_capture(self, index: int) -> cv2.VideoCapture | None:

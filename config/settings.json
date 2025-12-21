@@ -1,7 +1,7 @@
 {
   "mode": "auto",
   "simulation": false,
-  "run_state": "started",
+  "run_state": "stopped",
   "auto_threshold": true,
   "auto_target_color": "red",
   "wheel_polarity": {
@@ -28,58 +28,58 @@
     "red": {
       "hue_min": 0,
       "hue_max": 15,
-      "sat_min": 16,
-      "sat_max": 117,
-      "val_min": 70,
-      "val_max": 199
+      "sat_min": 60,
+      "sat_max": 246,
+      "val_min": 58,
+      "val_max": 142
     },
     "green": {
       "hue_min": 45,
       "hue_max": 90,
-      "sat_min": 16,
-      "sat_max": 117,
-      "val_min": 70,
-      "val_max": 199
+      "sat_min": 60,
+      "sat_max": 246,
+      "val_min": 58,
+      "val_max": 142
     },
     "blue": {
       "hue_min": 100,
       "hue_max": 140,
-      "sat_min": 16,
-      "sat_max": 117,
-      "val_min": 70,
-      "val_max": 199
+      "sat_min": 60,
+      "sat_max": 246,
+      "val_min": 58,
+      "val_max": 142
     },
     "yellow": {
       "hue_min": 20,
       "hue_max": 40,
-      "sat_min": 16,
-      "sat_max": 117,
-      "val_min": 70,
-      "val_max": 199
+      "sat_min": 60,
+      "sat_max": 246,
+      "val_min": 58,
+      "val_max": 142
     },
     "orange": {
       "hue_min": 5,
       "hue_max": 25,
-      "sat_min": 16,
-      "sat_max": 117,
-      "val_min": 70,
-      "val_max": 199
+      "sat_min": 60,
+      "sat_max": 246,
+      "val_min": 58,
+      "val_max": 142
     },
     "purple": {
       "hue_min": 130,
       "hue_max": 165,
-      "sat_min": 16,
-      "sat_max": 117,
-      "val_min": 70,
-      "val_max": 199
+      "sat_min": 60,
+      "sat_max": 246,
+      "val_min": 58,
+      "val_max": 142
     },
     "cyan": {
       "hue_min": 80,
       "hue_max": 100,
-      "sat_min": 16,
-      "sat_max": 117,
-      "val_min": 70,
-      "val_max": 199
+      "sat_min": 60,
+      "sat_max": 246,
+      "val_min": 58,
+      "val_max": 142
     }
   }
 }
