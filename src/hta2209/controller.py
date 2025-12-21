@@ -169,6 +169,8 @@ class RobotController:
         self._last_seen_time: float = 0.0
         self._cx_smooth: float = 0.0
         self._cy_smooth: float = 0.0
+        self._last_drive_time: float = 0.0
+        self._last_drive_cmd: Tuple[float, float] = (0.0, 0.0)
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
         self.load_config()
@@ -567,6 +569,10 @@ class RobotController:
         self._last_seen_time = 0.0
         self._cx_smooth = 0.0
         self._cy_smooth = 0.0
+        self._last_drive_time = 0.0
+        self._last_drive_cmd = (0.0, 0.0)
+        self._last_drive_time = 0.0
+        self._last_drive_cmd = (0.0, 0.0)
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
         if self.hbridge_ready and GPIO is not None:
@@ -824,15 +830,15 @@ class RobotController:
             center_x = frame_size[0] // 2
             error_x = cx_s - center_x
             norm_err = max(-1.0, min(1.0, error_x / max(1.0, frame_size[0] / 2)))
-            turn_cmd = max(-15.0, min(15.0, -norm_err * 30.0))  # hedef saga ise negatif donus
-            desired_cov = 0.40
-            stop_cov = 0.55
+            turn_cmd = max(-10.0, min(10.0, -norm_err * 20.0))  # hedef saga ise negatif donus
+            desired_cov = 0.45
+            stop_cov = 0.52
             if cov < desired_cov:
-                fwd_cmd = min(22.0, max(6.0, (desired_cov - cov) * 90.0))
+                fwd_cmd = min(12.0, max(3.0, (desired_cov - cov) * 50.0))
             elif cov >= stop_cov:
                 fwd_cmd = 0.0
             else:
-                fwd_cmd = 4.0  # cok yakinsa min ilerleme
+                fwd_cmd = 2.0  # cok yakinsa min ilerleme
             # Hedef teyidi yoksa (hit<2) ileri/geri yapma, sadece yönlen
             if self.auto_detect_hits < 2:
                 fwd_cmd = 0.0
@@ -840,7 +846,13 @@ class RobotController:
             if self.gripper_burst_until:
                 fwd_cmd = 0.0
                 turn_cmd = 0.0
-            self._set_drive(turn=turn_cmd, forward=fwd_cmd)
+            drive_turn, drive_fwd = turn_cmd, fwd_cmd
+            if now - self._last_drive_time < 0.5:
+                drive_turn, drive_fwd = self._last_drive_cmd
+            else:
+                self._last_drive_cmd = (drive_turn, drive_fwd)
+                self._last_drive_time = now
+            self._set_drive(turn=drive_turn, forward=drive_fwd)
             LOGGER.debug(
                 "Auto takip: err=%.3f turn=%.1f fwd=%.1f coverage=%.3f",
                 norm_err,
