@@ -147,9 +147,9 @@ class RobotController:
             joint: 0.0 if joint in self.continuous_joints else 90.0 for joint in self.servo_channels
         }
         default_thr = {
-            "red": Threshold(0, 15, 80, 255, 80, 255),
+            "red": Threshold(0, 20, 60, 255, 50, 255),
             "orange": Threshold(5, 25, 80, 255, 80, 255),
-            "yellow": Threshold(20, 40, 80, 255, 80, 255),
+            "yellow": Threshold(18, 45, 60, 255, 50, 255),
             "green": Threshold(45, 90, 80, 255, 80, 255),
             "cyan": Threshold(80, 100, 80, 255, 80, 255),
             "blue": Threshold(100, 140, 80, 255, 80, 255),
@@ -180,12 +180,15 @@ class RobotController:
         self._last_auto_calib: float = 0.0
         self._area_smooth: float = 0.0
         self._cx_smooth: float = 0.0
+        self._cy_smooth: float = 0.0
         self._drive_turn_smooth: float = 0.0
         self._drive_fwd_smooth: float = 0.0
         self._blue_release_cooldown: float = 0.0
         self._blue_confirm_hits: int = 0
         self._blue_last_seen_time: float = 0.0
         self._blue_last_pos: Optional[Tuple[int, int]] = None
+        self._target_hold_until: float = 0.0
+        self._target_smooth_color: Optional[str] = None
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -612,12 +615,15 @@ class RobotController:
         self._last_auto_calib = 0.0
         self._area_smooth = 0.0
         self._cx_smooth = 0.0
+        self._cy_smooth = 0.0
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
         self._blue_release_cooldown = 0.0
         self._blue_confirm_hits = 0
         self._blue_last_seen_time = 0.0
         self._blue_last_pos = None
+        self._target_hold_until = 0.0
+        self._target_smooth_color = None
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
         if self.hbridge_ready and GPIO is not None:
@@ -684,8 +690,8 @@ class RobotController:
         sat_min = max(40, min(200, sat_min))
         val_min = max(40, min(200, val_min))
         for thr in self.color_thresholds.values():
-            thr.sat_min = sat_min
-            thr.val_min = val_min
+            thr.sat_min = int(round(0.7 * thr.sat_min + 0.3 * sat_min))
+            thr.val_min = int(round(0.7 * thr.val_min + 0.3 * val_min))
             if thr.sat_max <= thr.sat_min:
                 thr.sat_max = min(255, thr.sat_min + 10)
             if thr.val_max <= thr.val_min:
@@ -918,12 +924,15 @@ class RobotController:
         self._last_auto_calib = 0.0
         self._area_smooth = 0.0
         self._cx_smooth = 0.0
+        self._cy_smooth = 0.0
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
         self._blue_release_cooldown = 0.0
         self._blue_confirm_hits = 0
         self._blue_last_seen_time = 0.0
         self._blue_last_pos = None
+        self._target_hold_until = 0.0
+        self._target_smooth_color = None
 
     def _trigger_blue_release(self, now: float) -> bool:
         """Open gripper when blue balloon is seen."""
@@ -1047,11 +1056,34 @@ class RobotController:
         blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
         blue_confirmed = self._confirm_blue_candidate(hsv_proc, blue_mask, blue_candidate, frame_size, now)
         if best_target:
-            self.last_target = best_target
-            self.last_target_color = best_target[5] if len(best_target) > 5 else None
+            cx, cy, area, depth_norm, mask_ratio, color = best_target
+            if self._target_smooth_color != color:
+                self._cx_smooth = float(cx)
+                self._cy_smooth = float(cy)
+                self._target_smooth_color = color
+            else:
+                smooth_alpha = 0.6
+                self._cx_smooth = smooth_alpha * self._cx_smooth + (1 - smooth_alpha) * cx
+                self._cy_smooth = smooth_alpha * self._cy_smooth + (1 - smooth_alpha) * cy
+            smoothed_target = (
+                int(round(self._cx_smooth)),
+                int(round(self._cy_smooth)),
+                area,
+                depth_norm,
+                mask_ratio,
+                color,
+            )
+            best_target = smoothed_target
+            self.last_target = smoothed_target
+            self.last_target_color = color
+            self._target_hold_until = now + 0.6
         else:
-            self.last_target = None
-            self.last_target_color = None
+            if self.last_target is not None and now <= self._target_hold_until:
+                best_target = self.last_target
+            else:
+                self.last_target = None
+                self.last_target_color = None
+                self._target_smooth_color = None
 
         # --- State Machine ---
         state = self.autopilot_state
@@ -1116,11 +1148,6 @@ class RobotController:
                 return
 
             cx, cy, area, depth_norm, mask_ratio, color = best_target
-            
-            # Keep a smoothed position for stability (raw cx used for turning)
-            alpha = 0.4
-            if self._cx_smooth == 0: self._cx_smooth = cx
-            else: self._cx_smooth = alpha * self._cx_smooth + (1 - alpha) * cx
 
             # --- Motion control ---
             cfg = self.autopilot_config

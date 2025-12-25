@@ -43,10 +43,10 @@
   "thresholds": {
     "red": {
       "hue_min": 0,
-      "hue_max": 15,
-      "sat_min": 60,
+      "hue_max": 20,
+      "sat_min": 55,
       "sat_max": 255,
-      "val_min": 58,
+      "val_min": 45,
       "val_max": 255
     },
     "green": {
@@ -66,11 +66,11 @@
       "val_max": 255
     },
     "yellow": {
-      "hue_min": 20,
-      "hue_max": 40,
-      "sat_min": 60,
+      "hue_min": 18,
+      "hue_max": 45,
+      "sat_min": 55,
       "sat_max": 255,
-      "val_min": 58,
+      "val_min": 45,
       "val_max": 255
     },
     "orange": {
