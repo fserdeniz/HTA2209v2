@@ -191,6 +191,7 @@ class RobotController:
         self._target_smooth_color: Optional[str] = None
         self._target_raw_pos: Optional[Tuple[int, int]] = None
         self._target_raw_color: Optional[str] = None
+        self._tracking_zone: int = 0
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -523,7 +524,7 @@ class RobotController:
             "scan_turn_speed": 45.0,
             "approach_area_threshold": 0.1,
             "stop_area_threshold": 0.15,
-            "tracking_turn_speed_max": 15.0,
+            "tracking_turn_speed_max": 10.0,
             "tracking_forward_speed_max": 15.0,
         }
         autopilot_conf = raw.get("autopilot", {})
@@ -628,6 +629,7 @@ class RobotController:
         self._target_smooth_color = None
         self._target_raw_pos = None
         self._target_raw_color = None
+        self._tracking_zone = 0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
         if self.hbridge_ready and GPIO is not None:
@@ -1151,6 +1153,7 @@ class RobotController:
             if not best_target:
                 LOGGER.info("Auto: Target lost during tracking. Returning to IDLE.")
                 self.autopilot_state = AutopilotState.IDLE
+                self._tracking_zone = 0
                 self.stop_all_motion()
                 return
             if blue_confirmed and self._trigger_blue_release(now):
@@ -1162,12 +1165,16 @@ class RobotController:
             # --- Motion control ---
             cfg = self.autopilot_config
             frame_area = frame_size[0] * frame_size[1]
+            if frame_area <= 0:
+                self.stop_wheels()
+                return
             normalized_area = area / frame_area
+            ratio_value = mask_ratio if mask_ratio is not None else normalized_area
             if self._area_smooth == 0.0:
-                self._area_smooth = normalized_area
+                self._area_smooth = ratio_value
             else:
-                self._area_smooth = 0.7 * self._area_smooth + 0.3 * normalized_area
-            area_for_ctrl = self._area_smooth
+                self._area_smooth = 0.7 * self._area_smooth + 0.3 * ratio_value
+            ratio_for_ctrl = self._area_smooth
 
             if self.gripper_burst_until and now < self.gripper_burst_until:
                 self.stop_wheels()
@@ -1184,15 +1191,29 @@ class RobotController:
             if width <= 0:
                 self.stop_wheels()
                 return
+            center_x = width / 2.0
             x1 = width / 3.0
             x2 = 2.0 * width / 3.0
-            if raw_cx < x1:
-                zone_turn = -1.0
-            elif raw_cx > x2:
-                zone_turn = 1.0
+            hysteresis = max(8.0, width * 0.04)
+            zone_turn = self._tracking_zone
+            if zone_turn == 0:
+                if raw_cx < x1 - hysteresis:
+                    zone_turn = -1
+                elif raw_cx > x2 + hysteresis:
+                    zone_turn = 1
+            elif zone_turn < 0:
+                if raw_cx > x1 + hysteresis:
+                    zone_turn = 0
             else:
-                zone_turn = 0.0
-            turn_cmd = zone_turn * cfg["tracking_turn_speed_max"]
+                if raw_cx < x2 - hysteresis:
+                    zone_turn = 0
+            self._tracking_zone = zone_turn
+
+            turn_cmd = 0.0
+            if zone_turn != 0:
+                error_norm = (raw_cx - center_x) / max(1.0, center_x)
+                error_norm = max(-1.0, min(1.0, error_norm))
+                turn_cmd = error_norm * cfg["tracking_turn_speed_max"]
             self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
 
             if zone_turn != 0.0:
@@ -1212,22 +1233,29 @@ class RobotController:
                 LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
                 return
 
-            if area_for_ctrl >= cfg["stop_area_threshold"]:
-                self._set_drive(turn=0.0, forward=0.0)
-                return
-
             base_speed = cfg["tracking_forward_speed_max"]
-            distance_factor = 1.0
-            if area_for_ctrl > cfg["approach_area_threshold"]:
-                span = max(1e-3, cfg["stop_area_threshold"] - cfg["approach_area_threshold"])
-                distance_factor = 1.0 - 0.6 * (area_for_ctrl - cfg["approach_area_threshold"]) / span
-            fwd_cmd = max(4.0, base_speed * distance_factor)
+            approach_area = cfg["approach_area_threshold"]
+            stop_area = cfg["stop_area_threshold"]
+            if stop_area < approach_area:
+                approach_area, stop_area = stop_area, approach_area
+
+            if ratio_for_ctrl <= approach_area:
+                distance_factor = 1.0 - 0.6 * (ratio_for_ctrl / max(1e-3, approach_area))
+                fwd_cmd = base_speed * distance_factor
+            elif ratio_for_ctrl < stop_area:
+                span = max(1e-3, stop_area - approach_area)
+                distance_factor = (stop_area - ratio_for_ctrl) / span
+                fwd_cmd = base_speed * 0.4 * distance_factor
+            else:
+                retreat_span = max(1e-3, stop_area)
+                retreat_factor = min(1.0, (ratio_for_ctrl - stop_area) / retreat_span)
+                fwd_cmd = -base_speed * retreat_factor
             if self.auto_forward_invert:
                 fwd_cmd = -fwd_cmd
             self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
             self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
             LOGGER.debug(
-                f"Auto TRACKING: Target={color}, Area={area_for_ctrl:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}"
+                f"Auto TRACKING: Target={color}, Ratio={ratio_for_ctrl:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}"
             )
             return
 
