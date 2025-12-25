@@ -1145,6 +1145,14 @@ class RobotController:
             if abs(norm_err) < cfg["tracking_deadband"]:
                 norm_err = 0.0
 
+            frame_area = frame_size[0] * frame_size[1]
+            normalized_area = area / frame_area
+            if self._area_smooth == 0.0:
+                self._area_smooth = normalized_area
+            else:
+                self._area_smooth = 0.7 * self._area_smooth + 0.3 * normalized_area
+            area_for_ctrl = self._area_smooth
+
             if self.gripper_burst_until and now < self.gripper_burst_until:
                 self.stop_wheels()
                 return
@@ -1154,12 +1162,13 @@ class RobotController:
 
             left_bound = frame_size[0] / 3.0
             right_bound = 2.0 * frame_size[0] / 3.0
-            centered = left_bound <= cx <= right_bound
+            center_pos = self._cx_smooth if self._cx_smooth else cx
+            centered = left_bound <= center_pos <= right_bound
 
             if not centered:
                 turn_cmd = max(
                     -cfg["tracking_turn_speed_max"],
-                    min(cfg["tracking_turn_speed_max"], -norm_err * cfg["tracking_turn_gain"]),
+                    min(cfg["tracking_turn_speed_max"], norm_err * cfg["tracking_turn_gain"]),
                 )
                 self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
                 self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
@@ -1180,7 +1189,16 @@ class RobotController:
                     LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
                     return
 
-                fwd_cmd = cfg["tracking_forward_speed_max"]
+                base_speed = cfg["tracking_forward_speed_max"]
+                center_factor = max(0.4, 1.0 - abs(norm_err))
+                distance_factor = 1.0
+                if area_for_ctrl > cfg["approach_area_threshold"]:
+                    span = max(1e-3, cfg["stop_area_threshold"] - cfg["approach_area_threshold"])
+                    if area_for_ctrl >= cfg["stop_area_threshold"]:
+                        distance_factor = 0.4
+                    else:
+                        distance_factor = 1.0 - 0.6 * (area_for_ctrl - cfg["approach_area_threshold"]) / span
+                fwd_cmd = max(4.0, base_speed * center_factor * distance_factor)
                 if self.auto_forward_invert:
                     fwd_cmd = -fwd_cmd
                 self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
@@ -1188,17 +1206,9 @@ class RobotController:
                 return
 
             # Fallback: area-based approach if dominant colors are unavailable
-            turn_cmd = max(-cfg["tracking_turn_speed_max"], min(cfg["tracking_turn_speed_max"], -norm_err * cfg["tracking_turn_gain"]))
+            turn_cmd = max(-cfg["tracking_turn_speed_max"], min(cfg["tracking_turn_speed_max"], norm_err * cfg["tracking_turn_gain"]))
 
             # Forward/backward control based on area
-            frame_area = frame_size[0] * frame_size[1]
-            normalized_area = area / frame_area
-            if self._area_smooth == 0.0:
-                self._area_smooth = normalized_area
-            else:
-                self._area_smooth = 0.7 * self._area_smooth + 0.3 * normalized_area
-            area_for_ctrl = self._area_smooth
-
             fwd_cmd = 0.0
             if area_for_ctrl > cfg["backward_area_threshold"]:
                 fwd_cmd = cfg["backward_speed"]

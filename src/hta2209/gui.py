@@ -650,6 +650,19 @@ class HTAControlGUI:
         self._camera_failures = 0
         self._current_camera_index = None
 
+    def _apply_preview_guides(self, frame):
+        if frame is None or frame.size == 0:
+            return frame
+        if self._last_frame is not None and frame is self._last_frame:
+            frame = frame.copy()
+        height, width = frame.shape[:2]
+        x1 = width // 3
+        x2 = (2 * width) // 3
+        guide_color = (255, 255, 255)
+        cv2.line(frame, (x1, 0), (x1, height - 1), guide_color, 1)
+        cv2.line(frame, (x2, 0), (x2, height - 1), guide_color, 1)
+        return frame
+
     def _update_camera_frame(self) -> None:
         if not self.camera_running:
             return
@@ -736,6 +749,7 @@ class HTAControlGUI:
             # Simulasyon modunda da PWM/matrixleri canlı görmek için yenile
             self.refresh_from_controller()
 
+        display_frame = self._apply_preview_guides(display_frame)
         image = Image.fromarray(display_frame)
         image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image=image)
@@ -817,6 +831,7 @@ class HTAControlGUI:
                     )
                 self.refresh_from_controller()
 
+            display_frame = self._apply_preview_guides(display_frame)
             image = Image.fromarray(display_frame)
             image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image=image)
@@ -916,6 +931,7 @@ class HTAControlGUI:
                 )
             self.refresh_from_controller()
 
+        display_frame = self._apply_preview_guides(display_frame)
         image = Image.fromarray(display_frame)
         image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image=image)
