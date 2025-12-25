@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Sequence
 
 import numpy as np
 import cv2
@@ -158,6 +158,7 @@ class RobotController:
         self.color_thresholds: Dict[str, Threshold] = {color: default_thr.get(color, Threshold()).clamp() for color in DEFAULT_COLORS}
         self.auto_threshold_enabled: bool = False
         self.auto_target_color: str = DEFAULT_COLORS[0]
+        self.dominant_colors_hint: Tuple[str, ...] = tuple()
         self.auto_grasped: bool = False
         self.auto_forward_invert: bool = False
         self.mode: str = "manual"
@@ -741,6 +742,13 @@ class RobotController:
             v_std,
         )
 
+    def set_dominant_colors_hint(self, colors: Optional[Sequence[str]]) -> None:
+        if not colors:
+            self.dominant_colors_hint = tuple()
+            return
+        normalized = [c.strip().lower() for c in colors if c]
+        self.dominant_colors_hint = tuple(normalized)
+
     # ------------------------------------------------------------------ #
     # Autopilot (color approach + grasp)
     # ------------------------------------------------------------------ #
@@ -866,7 +874,10 @@ class RobotController:
     def _find_best_target(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> Optional[Tuple]:
         """Find the best target in the frame by iterating through allowed colors."""
         # Yalnızca sarı ve kırmızı takip edilebilir; mavi tamamen devre dışı
-        if self.auto_target_color in ("yellow", "red"):
+        dominant_hint = [c for c in self.dominant_colors_hint if c in ("yellow", "red")]
+        if dominant_hint:
+            allowed_colors = tuple(dict.fromkeys(dominant_hint))
+        elif self.auto_target_color in ("yellow", "red"):
             allowed_colors = (self.auto_target_color,)
         else:
             allowed_colors = ("yellow", "red")

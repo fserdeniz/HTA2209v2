@@ -683,6 +683,7 @@ class HTAControlGUI:
             frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
         self._last_frame = frame_rgb
         display_frame = frame_rgb
+        colors = []
 
         if self.ai_detection_var.get():
             overlay, colors = detector.analyze_frame(self._last_frame)
@@ -695,11 +696,8 @@ class HTAControlGUI:
         else:
             self.ai_colors_var.set("")
 
-        dominant_list = None
-        if self.ai_detection_var.get() and self.ai_colors_var.get():
-            names = self.ai_colors_var.get().replace("Dominant renkler:","").strip()
-            if names:
-                dominant_list = [n.strip() for n in names.split(",") if n.strip()]
+        dominant_list = [c[0] for c in colors] if colors else None
+        self.controller.set_dominant_colors_hint(dominant_list)
 
         if not self.controller.is_manual():
             hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
@@ -768,6 +766,7 @@ class HTAControlGUI:
                 frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             self._last_frame = frame_rgb
             display_frame = frame_rgb
+            colors = []
             if self.ai_detection_var.get():
                 overlay, colors = detector.analyze_frame(self._last_frame)
                 display_frame = overlay
@@ -779,11 +778,8 @@ class HTAControlGUI:
             else:
                 self.ai_colors_var.set("")
 
-            dominant_list = None
-            if self.ai_detection_var.get() and self.ai_colors_var.get():
-                names = self.ai_colors_var.get().replace("Dominant renkler:","").strip()
-                if names:
-                    dominant_list = [n.strip() for n in names.split(",") if n.strip()]
+            dominant_list = [c[0] for c in colors] if colors else None
+            self.controller.set_dominant_colors_hint(dominant_list)
 
             if not self.controller.is_manual():
                 hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
@@ -869,6 +865,7 @@ class HTAControlGUI:
         self._last_frame = frame
         display_frame = self._last_frame
 
+        colors = []
         if self.ai_detection_var.get():
             overlay, colors = detector.analyze_frame(self._last_frame)
             display_frame = overlay
@@ -880,11 +877,8 @@ class HTAControlGUI:
         else:
             self.ai_colors_var.set("")
 
-        dominant_list = None
-        if self.ai_detection_var.get() and self.ai_colors_var.get():
-            names = self.ai_colors_var.get().replace("Dominant renkler:","").strip()
-            if names:
-                dominant_list = [n.strip() for n in names.split(",") if n.strip()]
+        dominant_list = [c[0] for c in colors] if colors else None
+        self.controller.set_dominant_colors_hint(dominant_list)
 
         if not self.controller.is_manual():
             hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
