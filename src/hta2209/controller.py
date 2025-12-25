@@ -850,43 +850,20 @@ class RobotController:
         if max_val < 0.03:
             return mask, None, 0.0
 
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
         label = labels[max_loc[1], max_loc[0]]
         if label == 0 or label >= num_labels:
             return mask, None, 0.0
         area = int(stats[label, cv2.CC_STAT_AREA])
         if area < min_area:
             return mask, None, 0.0
-        cx = int(centroids[label][0])
-        cy = int(centroids[label][1])
+        cx = int(max_loc[0])
+        cy = int(max_loc[1])
         mask_ratio = area / frame_area
         depth_norm = 1.0 / max(1.0, min(area, frame_area))
         depth_norm = max(0.0, min(1.0, depth_norm * 1000))
         score = float(max_val) + min(0.3, mask_ratio * 3.0)
         return mask, (cx, cy, area, depth_norm, float(mask_ratio), color), score
-
-    def _dominant_zone(self, hsv_frame: np.ndarray, color: str) -> Tuple[Optional[int], int]:
-        mask, thr, ranges = self._build_color_mask(hsv_frame, color)
-        if thr is None:
-            return None, 0
-        if not self._validate_mask_color(hsv_frame, mask, thr, ranges, sat_floor=80, val_floor=60):
-            return None, 0
-        height, width = mask.shape[:2]
-        frame_area = height * width
-        min_area = max(120.0, frame_area * 0.002)
-        x1 = width // 3
-        x2 = (2 * width) // 3
-        left = cv2.countNonZero(mask[:, :x1])
-        mid = cv2.countNonZero(mask[:, x1:x2])
-        right = cv2.countNonZero(mask[:, x2:])
-        total = left + mid + right
-        if total < min_area:
-            return None, total
-        if mid >= left and mid >= right:
-            return 1, total
-        if left >= right:
-            return 0, total
-        return 2, total
 
     def _aim_arm(self, target: Tuple[int, int, int, float, float, str], frame_size: Tuple[int, int]) -> None:
         """
@@ -1162,16 +1139,22 @@ class RobotController:
                 self.stop_wheels()
                 return
 
-            zone, _zone_total = self._dominant_zone(hsv_proc, color)
-            if zone is None:
+            width = frame_size[0]
+            if width <= 0:
                 self.stop_wheels()
                 return
-
-            zone_turn = -1.0 if zone == 0 else 1.0 if zone == 2 else 0.0
+            x1 = width / 3.0
+            x2 = 2.0 * width / 3.0
+            if cx < x1:
+                zone_turn = -1.0
+            elif cx > x2:
+                zone_turn = 1.0
+            else:
+                zone_turn = 0.0
             turn_cmd = zone_turn * cfg["tracking_turn_speed_max"]
             self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
 
-            if zone != 1:
+            if zone_turn != 0.0:
                 self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
                 return
 
