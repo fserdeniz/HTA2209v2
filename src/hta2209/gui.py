@@ -1,4 +1,4 @@
-s"""
+"""
 Tkinter GUI for HTA2209 with camera preview, manual/auto control, and test runners.
 """
 from __future__ import annotations
@@ -77,6 +77,7 @@ class HTAControlGUI:
 
         self.picam_supported = False
         self.picam: Picamera2 | None = None
+        self._picam_color_order = "bgr"
         self._ensure_picamera2()
 
         # Bu sistemde yalnızca CSI portundaki Picamera2 kullanılacak
@@ -605,8 +606,14 @@ class HTAControlGUI:
         try:
             if self.picam is None:
                 self.picam = Picamera2()
-            config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
-            self.picam.configure(config)
+            self._picam_color_order = "bgr"
+            try:
+                config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "BGR888"})
+                self.picam.configure(config)
+            except Exception:
+                config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
+                self.picam.configure(config)
+                self._picam_color_order = "rgb"
             self.picam.start()
             self.source_type_var.set("picam")
             self.camera_running = True
@@ -834,6 +841,8 @@ class HTAControlGUI:
                 raise RuntimeError("Picamera2 frame is None")
             # Kamera ters takili, 180 derece cevir
             frame = cv2.rotate(frame, cv2.ROTATE_180)
+            if self._picam_color_order == "rgb":
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         except Exception as exc:
             self._camera_failures += 1
             if self._camera_failures >= 5:
@@ -844,7 +853,7 @@ class HTAControlGUI:
             return
 
         self._camera_failures = 0
-        # Picamera2 capture_array() ile donen veriyi BGR kabul ediyoruz (gercek cihaz renkleri dogru kalsin)
+        # Normalize Picamera2 output to BGR for the OpenCV pipeline.
         self._last_frame = frame
         display_frame = self._last_frame
 

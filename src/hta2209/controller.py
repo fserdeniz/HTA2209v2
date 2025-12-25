@@ -158,7 +158,7 @@ class RobotController:
         self.mode: str = "manual"
         self.simulation_enabled: bool = False
         self.run_state: str = "stopped"  # started, paused, stopped
-        self.last_target: Optional[Tuple[int, int, int]] = None  # (cx, cy, area)
+        self.last_target: Optional[Tuple[int, int, int, float, float, str]] = None  # (cx, cy, area, depth, mask_ratio, color)
         self.last_target_color: Optional[str] = None
         # Autopilot state machine
         self.autopilot_state: AutopilotState = AutopilotState.IDLE
@@ -307,6 +307,7 @@ class RobotController:
         """Sadece tekerlekleri durdur (kol/gripper etkilenmez)."""
         for wheel in self.wheel_state:
             self.wheel_state[wheel] = 0.0
+            self.pwm_output[wheel] = 0.0
         if self.hbridge_ready and not self.is_simulation():  # pragma: no cover
             self._apply_wheels_to_hbridge()
         self._recompute_power()
@@ -418,6 +419,8 @@ class RobotController:
             "wheels": self.wheel_state,
             "arm": self.arm_state,
             "servo_channels": self.servo_channels,
+            "l298n_pins": dict(self.l298n_pins),
+            "autopilot": dict(self.autopilot_config),
             "thresholds": {color: thr.as_dict() for color, thr in self.color_thresholds.items()},
         }
 
@@ -670,7 +673,27 @@ class RobotController:
         # Ortam aydinligina gore (V ortalama / std) min-max belirle
         v_mean = float(np.mean(val))
         v_std = float(np.std(val))
-        ss
+        sat_min = float(np.percentile(sat, low_pct))
+        sat_max = float(np.percentile(sat, high_pct))
+        v_span = max(10.0, v_std * 1.5)
+        val_min = v_mean - v_span
+        val_max = v_mean + v_span
+
+        sat_min = int(max(0.0, min(255.0, sat_min)))
+        sat_max = int(max(0.0, min(255.0, sat_max)))
+        if sat_max <= sat_min:
+            sat_min = max(0, sat_min - 10)
+            sat_max = min(255, sat_max + 10)
+        if sat_max <= sat_min:
+            sat_min, sat_max = 0, 255
+
+        val_min = int(max(0.0, min(255.0, val_min)))
+        val_max = int(max(0.0, min(255.0, val_max)))
+        if val_max <= val_min:
+            val_min = max(0, int(v_mean) - 10)
+            val_max = min(255, int(v_mean) + 10)
+        if val_max <= val_min:
+            val_min, val_max = 0, 255
         for thr in self.color_thresholds.values():
             thr.sat_min = sat_min
             thr.sat_max = sat_max
@@ -765,12 +788,20 @@ class RobotController:
                 h_med = float(np.median(masked_pixels[:, 0]))
                 s_med = float(np.median(masked_pixels[:, 1]))
                 v_med = float(np.median(masked_pixels[:, 2]))
-                center = (thr.hue_min + thr.hue_max) / 2.0
-                span = (thr.hue_max - thr.hue_min) / 2.0 + 5.0  # hue toleransi
-                hue_diff = min(abs(h_med - center), 180 - abs(h_med - center))
                 sat_floor = max(thr.sat_min, 70)
                 val_floor = max(thr.val_min, 50)
-                if s_med < sat_floor or v_med < val_floor or hue_diff > span:
+                hue_diff = None
+                hue_span = None
+                for h_min, h_max in ranges:
+                    center = (h_min + h_max) / 2.0
+                    span = (h_max - h_min) / 2.0 + 5.0  # hue toleransi
+                    diff = min(abs(h_med - center), 180 - abs(h_med - center))
+                    if hue_diff is None or diff < hue_diff:
+                        hue_diff = diff
+                        hue_span = span
+                if hue_diff is None or hue_span is None:
+                    return mask, None
+                if s_med < sat_floor or v_med < val_floor or hue_diff > hue_span:
                     LOGGER.debug(
                         "Maske reddedildi: hue_med=%.1f sat_med=%.1f val_med=%.1f (sat>=%.0f, val>=%.0f, hue_diff<=%.1f)",
                         h_med,
@@ -778,7 +809,7 @@ class RobotController:
                         v_med,
                         sat_floor,
                         val_floor,
-                        span,
+                        hue_span,
                     )
                     return mask, None
                 return mask_img, target
@@ -786,13 +817,13 @@ class RobotController:
                 return mask_img, target
         return mask, None
 
-    def _aim_arm(self, target: Tuple[int, int, int, float], frame_size: Tuple[int, int]) -> None:
+    def _aim_arm(self, target: Tuple[int, int, int, float, float, str], frame_size: Tuple[int, int]) -> None:
         """
         Move single positional joint toward target (horizontal pan); continuous gripper is not auto-driven here.
         """
         if "joint" not in self.arm_state:
             return
-        cx, _cy, _area, _depth = target
+        cx = int(target[0])
         width, _height = frame_size
         center_x = width // 2
         error_x = cx - center_x
@@ -810,7 +841,6 @@ class RobotController:
             allowed_colors = ("yellow", "red")
 
         best_target = None
-        best_color = None
         best_conf = -1.0
         frame_area = max(1, int(frame_size[0] * frame_size[1]))
         center_x = frame_size[0] // 2
@@ -826,10 +856,9 @@ class RobotController:
             if conf > best_conf:
                 best_conf = conf
                 best_target = candidate
-                best_color = color
         
         if best_target:
-            return best_target + (best_color,)
+            return best_target
         return None
 
     def _reset_autopilot(self) -> None:
@@ -838,6 +867,7 @@ class RobotController:
         self.auto_scan_step = 0
         self.auto_detect_hits = 0
         self.last_target = None
+        self.last_target_color = None
         self.gripper_burst_until = 0.0
         self.gripper_reverse_until = 0.0
         self._target_was_visible = False
@@ -875,9 +905,23 @@ class RobotController:
             if self.autopilot_state != AutopilotState.IDLE:
                 self._reset_autopilot()
                 self.stop_all_motion()
+            self.last_target = None
+            self.last_target_color = None
             return
 
         now = time.monotonic()
+        if self.gripper_reverse_until and now >= self.gripper_reverse_until:
+            self.gripper_reverse_until = 0.0
+            try:
+                self.set_continuous_speed("gripper", 0.0)
+            except Exception:
+                pass
+        if self.gripper_burst_until and now >= self.gripper_burst_until:
+            self.gripper_burst_until = 0.0
+            try:
+                self.set_continuous_speed("gripper", 0.0)
+            except Exception:
+                pass
 
         # Frame pre-processing
         if hsv_frame is None or hsv_frame.size == 0:
@@ -893,6 +937,12 @@ class RobotController:
 
         best_target = self._find_best_target(hsv_proc, frame_size)
         _blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
+        if best_target:
+            self.last_target = best_target
+            self.last_target_color = best_target[5] if len(best_target) > 5 else None
+        else:
+            self.last_target = None
+            self.last_target_color = None
 
         # --- State Machine ---
         state = self.autopilot_state
