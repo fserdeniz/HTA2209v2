@@ -159,6 +159,7 @@ class RobotController:
         self.auto_threshold_enabled: bool = False
         self.auto_target_color: str = DEFAULT_COLORS[0]
         self.auto_grasped: bool = False
+        self.auto_forward_invert: bool = False
         self.mode: str = "manual"
         self.simulation_enabled: bool = False
         self.run_state: str = "stopped"  # started, paused, stopped
@@ -423,6 +424,7 @@ class RobotController:
             "run_state": self.run_state,
             "auto_threshold": self.auto_threshold_enabled,
             "auto_target_color": self.auto_target_color,
+            "auto_forward_invert": self.auto_forward_invert,
             "wheel_polarity": self.wheel_polarity,
             "wheels": self.wheel_state,
             "arm": self.arm_state,
@@ -508,6 +510,7 @@ class RobotController:
         target = raw.get("auto_target_color", DEFAULT_COLORS[0])
         if target in self.color_thresholds:
             self.auto_target_color = target
+        self.auto_forward_invert = bool(raw.get("auto_forward_invert", self.auto_forward_invert))
         self.simulation_enabled = bool(raw.get("simulation", self.simulation_enabled))
         # Kaydedilen calisma durumu okunur ama guvenlik icin acilis her zaman durdurulmus olsun
         self.run_state = raw.get("run_state", "stopped")
@@ -1060,6 +1063,9 @@ class RobotController:
                 return
             elif normalized_area < cfg["approach_area_threshold"]:
                  fwd_cmd = min(cfg["tracking_forward_speed_max"], max(5.0, (cfg["approach_area_threshold"] - normalized_area) * cfg["tracking_forward_gain"]))
+
+            if self.auto_forward_invert:
+                fwd_cmd = -fwd_cmd
 
             self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
             self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd

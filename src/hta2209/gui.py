@@ -374,7 +374,11 @@ class HTAControlGUI:
                 self.run_state_var.set(f"Durum: {self.controller.run_state}")
             except Exception:
                 pass
-        self.manual_drive_level = self._clamp_speed(self.manual_drive_level + delta)
+        next_level = self.manual_drive_level + delta
+        if self.manual_drive_level != 0 and (self.manual_drive_level * next_level) < 0:
+            self.manual_drive_level = 0.0
+        else:
+            self.manual_drive_level = self._clamp_speed(next_level)
         self._apply_drive_turn()
 
     def _adjust_turn(self, delta: float) -> None:
