@@ -4,7 +4,7 @@
   "run_state": "stopped",
   "auto_threshold": true,
   "auto_target_color": "red",
-  "auto_forward_invert": true,
+  "auto_forward_invert": false,
   "wheel_polarity": {
     "front_left": 1,
     "front_right": 1,

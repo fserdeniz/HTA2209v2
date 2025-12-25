@@ -844,7 +844,7 @@ class RobotController:
         if thr is None:
             return mask, None, 0.0
         frame_area = float(mask.shape[0] * mask.shape[1])
-        min_area = max(120.0, frame_area * 0.001)
+        min_area = max(80.0, frame_area * 0.0005)
         if cv2.countNonZero(mask) < min_area:
             return mask, None, 0.0
         if not self._validate_mask_color(hsv_frame, mask, thr, ranges, sat_floor=70, val_floor=50):
@@ -859,7 +859,7 @@ class RobotController:
             kernel += 1
         density = cv2.blur(weight, (kernel, kernel))
         _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(density)
-        if max_val < 0.02:
+        if max_val < 0.015:
             return mask, None, 0.0
 
         num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -1216,23 +1216,6 @@ class RobotController:
                 turn_cmd = error_norm * cfg["tracking_turn_speed_max"]
             self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
 
-            if zone_turn != 0.0:
-                self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
-                return
-
-            dominant_list = list(self.dominant_colors_hint)
-            dominant_rank = dominant_list.index(color) if color in dominant_list else None
-            if dominant_rank == 1 and not self.auto_grasped:
-                self.stop_wheels()
-                try:
-                    self.set_continuous_speed("gripper", 25.0)
-                except Exception:
-                    pass
-                self.gripper_burst_until = now + 3.0
-                self.auto_grasped = True
-                LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
-                return
-
             base_speed = cfg["tracking_forward_speed_max"]
             approach_area = cfg["approach_area_threshold"]
             stop_area = cfg["stop_area_threshold"]
@@ -1250,9 +1233,37 @@ class RobotController:
                 retreat_span = max(1e-3, stop_area)
                 retreat_factor = min(1.0, (ratio_for_ctrl - stop_area) / retreat_span)
                 fwd_cmd = -base_speed * retreat_factor
+
+            if zone_turn != 0.0:
+                turn_fwd_cmd = 0.0
+                if ratio_for_ctrl < stop_area:
+                    turn_fwd_cmd = max(0.0, fwd_cmd) * 0.35
+                    if turn_fwd_cmd > 0.0:
+                        turn_fwd_cmd = max(4.0, turn_fwd_cmd)
+                if self.auto_forward_invert:
+                    turn_fwd_cmd = -turn_fwd_cmd
+                self._drive_fwd_smooth = 0.7 * self._drive_fwd_smooth + 0.3 * turn_fwd_cmd
+                self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
+                return
+
+            dominant_list = list(self.dominant_colors_hint)
+            dominant_rank = dominant_list.index(color) if color in dominant_list else None
+            if dominant_rank == 1 and not self.auto_grasped:
+                self.stop_wheels()
+                try:
+                    self.set_continuous_speed("gripper", 25.0)
+                except Exception:
+                    pass
+                self.gripper_burst_until = now + 3.0
+                self.auto_grasped = True
+                LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
+                return
+
+            if fwd_cmd > 0.0:
+                fwd_cmd = max(4.0, fwd_cmd)
             if self.auto_forward_invert:
                 fwd_cmd = -fwd_cmd
-            self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
+            self._drive_fwd_smooth = 0.7 * self._drive_fwd_smooth + 0.3 * fwd_cmd
             self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
             LOGGER.debug(
                 f"Auto TRACKING: Target={color}, Ratio={ratio_for_ctrl:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}"
