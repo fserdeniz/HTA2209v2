@@ -135,6 +135,8 @@ class RobotController:
         self.l298n_pins: Dict[str, int] = dict(DEFAULT_L298N_PINS)
         self.l298n_invert_right: bool = True
         self.l298n_swap_sides: bool = False
+        self.drive_invert: bool = False
+        self.camera_swap_rb: bool = False
 
         self.wheel_state: Dict[str, float] = {wheel: 0.0 for wheel in WHEEL_CHANNELS}
         self.wheel_polarity: Dict[str, int] = {wheel: 1 for wheel in WHEEL_CHANNELS}
@@ -428,6 +430,8 @@ class RobotController:
             "l298n_pins": dict(self.l298n_pins),
             "l298n_invert_right": self.l298n_invert_right,
             "l298n_swap_sides": self.l298n_swap_sides,
+            "drive_invert": self.drive_invert,
+            "camera_swap_rb": self.camera_swap_rb,
             "autopilot": dict(self.autopilot_config),
             "thresholds": {color: thr.as_dict() for color, thr in self.color_thresholds.items()},
         }
@@ -473,6 +477,10 @@ class RobotController:
             self.l298n_invert_right = bool(raw.get("l298n_invert_right"))
         if "l298n_swap_sides" in raw:
             self.l298n_swap_sides = bool(raw.get("l298n_swap_sides"))
+        if "drive_invert" in raw:
+            self.drive_invert = bool(raw.get("drive_invert"))
+        if "camera_swap_rb" in raw:
+            self.camera_swap_rb = bool(raw.get("camera_swap_rb"))
         # Opsiyonel servo kanal konfigurasyonu
         servo_ch = raw.get("servo_channels", {})
         for joint, ch in servo_ch.items():
@@ -1073,8 +1081,9 @@ class RobotController:
 
     def _set_drive(self, turn: float, forward: float) -> None:
         # simple differential mix
-        left = max(-100.0, min(100.0, forward + turn))
-        right = max(-100.0, min(100.0, forward - turn))
+        forward_cmd = -forward if self.drive_invert else forward
+        left = max(-100.0, min(100.0, forward_cmd + turn))
+        right = max(-100.0, min(100.0, forward_cmd - turn))
         for wheel in self.wheels():
             val = left if "left" in wheel else right
             self.set_wheel_speed(wheel, val)

@@ -26,6 +26,8 @@
   },
   "l298n_invert_right": true,
   "l298n_swap_sides": true,
+  "drive_invert": true,
+  "camera_swap_rb": true,
   "autopilot": {
     "scan_initial_wait": 3.0,
     "scan_rotate_duration": 0.5,

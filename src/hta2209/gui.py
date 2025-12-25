@@ -388,11 +388,7 @@ class HTAControlGUI:
         self._apply_drive_turn()
 
     def _apply_drive_turn(self) -> None:
-        left = self._clamp_speed(self.manual_drive_level + self.manual_turn_level)
-        right = self._clamp_speed(self.manual_drive_level - self.manual_turn_level)
-        for wheel in self.controller.wheels():
-            value = left if "left" in wheel else right
-            self.controller.set_wheel_speed(wheel, value)
+        self.controller._set_drive(turn=self.manual_turn_level, forward=self.manual_drive_level)
         self.refresh_from_controller()
 
     @staticmethod
@@ -679,6 +675,8 @@ class HTAControlGUI:
             return
         self._camera_failures = 0
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if self.controller.camera_swap_rb:
+            frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
         self._last_frame = frame_rgb
         display_frame = frame_rgb
 
@@ -762,6 +760,8 @@ class HTAControlGUI:
             self.ai_colors_var.set("")
         else:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if self.controller.camera_swap_rb:
+                frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             self._last_frame = frame_rgb
             display_frame = frame_rgb
             if self.ai_detection_var.get():
@@ -849,6 +849,8 @@ class HTAControlGUI:
                     frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
             elif self._picam_color_order == "bgr":
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if self.controller.camera_swap_rb:
+                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         except Exception as exc:
             self._camera_failures += 1
             if self._camera_failures >= 5:
@@ -1154,17 +1156,15 @@ class HTAControlGUI:
         if not self.controller.is_manual():
             return
         keysym = event.keysym.lower()
-        if keysym == "up":
-            self._adjust_drive(MANUAL_DRIVE_INCREMENT)
-            return
-        if keysym == "down":
-            self._adjust_drive(-MANUAL_DRIVE_INCREMENT)
-            return
-        if keysym == "left":
-            self._adjust_turn(-MANUAL_TURN_INCREMENT)
-            return
-        if keysym == "right":
-            self._adjust_turn(MANUAL_TURN_INCREMENT)
+        key_map = {
+            "up": "forward",
+            "down": "backward",
+            "left": "left",
+            "right": "right",
+        }
+        action = key_map.get(keysym)
+        if action:
+            self._drive_button_action(action)
             return
         if keysym == "space":
             self._reset_manual_motion()
