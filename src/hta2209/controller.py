@@ -181,6 +181,7 @@ class RobotController:
         self.gripper_cooldown_until: float = 0.0
         self._last_auto_calib: float = 0.0
         self._coverage_smooth: float = 0.0
+        self._area_smooth: float = 0.0
         self._last_seen_time: float = 0.0
         self._cx_smooth: float = 0.0
         self._cy_smooth: float = 0.0
@@ -193,6 +194,9 @@ class RobotController:
         self._scan_turning_until: float = 0.0
         self._scan_next_turn_at: float = 0.0
         self._blue_release_cooldown: float = 0.0
+        self._blue_confirm_hits: int = 0
+        self._blue_last_seen_time: float = 0.0
+        self._blue_last_pos: Optional[Tuple[int, int]] = None
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -625,6 +629,7 @@ class RobotController:
         self.gripper_cooldown_until = 0.0
         self._last_auto_calib = 0.0
         self._coverage_smooth = 0.0
+        self._area_smooth = 0.0
         self._last_seen_time = 0.0
         self._cx_smooth = 0.0
         self._cy_smooth = 0.0
@@ -637,6 +642,9 @@ class RobotController:
         self._scan_turning_until = 0.0
         self._scan_next_turn_at = 0.0
         self._blue_release_cooldown = 0.0
+        self._blue_confirm_hits = 0
+        self._blue_last_seen_time = 0.0
+        self._blue_last_pos = None
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
         if self.hbridge_ready and GPIO is not None:
@@ -867,6 +875,11 @@ class RobotController:
         best_conf = -1.0
         frame_area = max(1, int(frame_size[0] * frame_size[1]))
         center_x = frame_size[0] // 2
+        prev_target = self.last_target
+        prev_color = self.last_target_color if self.last_target_color in allowed_colors else None
+        prev_cx = prev_target[0] if prev_target else None
+        prev_cy = prev_target[1] if prev_target else None
+        max_dist = max(1.0, min(frame_size) * 0.25)
 
         for color in allowed_colors:
             _mask, candidate = self._mask_target(hsv_frame, color)
@@ -876,6 +889,12 @@ class RobotController:
             area_norm = area / frame_area
             center_score = max(0.0, 1.0 - abs(cx - center_x) / max(1.0, center_x))
             conf = area_norm * 0.6 + mask_ratio * 0.8 + center_score * 0.4
+            if prev_color == color:
+                conf += 0.15
+            if prev_cx is not None and prev_cy is not None:
+                dist = float(np.hypot(cx - prev_cx, cy - prev_cy))
+                if dist <= max_dist:
+                    conf += 0.15 * (1.0 - dist / max_dist)
             if conf > best_conf:
                 best_conf = conf
                 best_target = candidate
@@ -897,6 +916,7 @@ class RobotController:
         self.gripper_cooldown_until = 0.0
         self._last_auto_calib = 0.0
         self._coverage_smooth = 0.0
+        self._area_smooth = 0.0
         self._last_seen_time = 0.0
         self._cx_smooth = 0.0
         self._cy_smooth = 0.0
@@ -905,6 +925,9 @@ class RobotController:
         self._scan_turning_until = 0.0
         self._scan_next_turn_at = 0.0
         self._blue_release_cooldown = 0.0
+        self._blue_confirm_hits = 0
+        self._blue_last_seen_time = 0.0
+        self._blue_last_pos = None
 
     def _trigger_blue_release(self, now: float) -> bool:
         """Open gripper when blue balloon is seen."""
@@ -917,8 +940,74 @@ class RobotController:
             pass
         self.gripper_reverse_until = now + 3.0
         self._blue_release_cooldown = now + 6.0
+        self._blue_confirm_hits = 0
+        self._blue_last_seen_time = 0.0
+        self._blue_last_pos = None
         LOGGER.info("Auto: Blue balloon detected, releasing grip.")
         return True
+
+    def _confirm_blue_candidate(
+        self,
+        hsv_frame: np.ndarray,
+        mask: np.ndarray,
+        candidate: Optional[Tuple[int, int, int, float, float, str]],
+        frame_size: Tuple[int, int],
+        now: float,
+    ) -> bool:
+        if candidate is None:
+            self._blue_confirm_hits = 0
+            self._blue_last_seen_time = 0.0
+            self._blue_last_pos = None
+            return False
+
+        cx, cy, area, _depth, mask_ratio, _color = candidate
+        frame_area = max(1.0, float(frame_size[0] * frame_size[1]))
+        area_norm = area / frame_area
+        if area_norm < 0.004 or area_norm > 0.60 or mask_ratio < 0.004 or mask_ratio > 0.35:
+            self._blue_confirm_hits = 0
+            self._blue_last_seen_time = 0.0
+            self._blue_last_pos = None
+            return False
+
+        masked_pixels = hsv_frame[mask > 0]
+        if masked_pixels.size == 0:
+            self._blue_confirm_hits = 0
+            self._blue_last_seen_time = 0.0
+            self._blue_last_pos = None
+            return False
+
+        hue = masked_pixels[:, 0].astype(np.int16)
+        sat = masked_pixels[:, 1].astype(np.int16)
+        val = masked_pixels[:, 2].astype(np.int16)
+        h_med = float(np.median(hue))
+        s_med = float(np.median(sat))
+        v_med = float(np.median(val))
+        hue_diff = np.minimum(np.abs(hue - h_med), 180 - np.abs(hue - h_med))
+        hue_spread = float(np.percentile(hue_diff, 80))
+
+        thr = self.color_thresholds.get("blue")
+        sat_floor = max(thr.sat_min if thr else 0, 90)
+        val_floor = max(thr.val_min if thr else 0, 60)
+        if s_med < sat_floor or v_med < val_floor or hue_spread > 18.0:
+            self._blue_confirm_hits = 0
+            self._blue_last_seen_time = 0.0
+            self._blue_last_pos = None
+            return False
+
+        if self._blue_last_pos and now - self._blue_last_seen_time <= 0.7:
+            last_x, last_y = self._blue_last_pos
+            max_jump = max(20, int(min(frame_size) * 0.08))
+            dist = float(np.hypot(cx - last_x, cy - last_y))
+            if dist <= max_jump:
+                self._blue_confirm_hits += 1
+            else:
+                self._blue_confirm_hits = 1
+        else:
+            self._blue_confirm_hits = 1
+
+        self._blue_last_seen_time = now
+        self._blue_last_pos = (cx, cy)
+        return self._blue_confirm_hits >= 2
 
     def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> None:
         """
@@ -959,7 +1048,8 @@ class RobotController:
             LOGGER.debug("Auto: periodic color calibration applied.")
 
         best_target = self._find_best_target(hsv_proc, frame_size)
-        _blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
+        blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
+        blue_confirmed = self._confirm_blue_candidate(hsv_proc, blue_mask, blue_candidate, frame_size, now)
         if best_target:
             self.last_target = best_target
             self.last_target_color = best_target[5] if len(best_target) > 5 else None
@@ -972,7 +1062,7 @@ class RobotController:
 
         if state == AutopilotState.IDLE:
             self.stop_all_motion()
-            if blue_candidate and self._trigger_blue_release(now):
+            if blue_confirmed and self._trigger_blue_release(now):
                 return
             if best_target:
                 LOGGER.info("Auto: Target found while idle, switching to TRACKING.")
@@ -986,7 +1076,7 @@ class RobotController:
 
         if state == AutopilotState.SCANNING:
             cfg = self.autopilot_config
-            if blue_candidate and self._trigger_blue_release(now):
+            if blue_confirmed and self._trigger_blue_release(now):
                 return
             if self.auto_scan_step == 0 and now - self.auto_state_started_at < cfg["scan_initial_wait"]:
                 # Initial wait before starting the scan
@@ -1025,7 +1115,7 @@ class RobotController:
                 self.autopilot_state = AutopilotState.IDLE
                 self.stop_all_motion()
                 return
-            if blue_candidate and self._trigger_blue_release(now):
+            if blue_confirmed and self._trigger_blue_release(now):
                 self.autopilot_state = AutopilotState.IDLE
                 return
 
@@ -1050,19 +1140,24 @@ class RobotController:
             # Forward/backward control based on area
             frame_area = frame_size[0] * frame_size[1]
             normalized_area = area / frame_area
+            if self._area_smooth == 0.0:
+                self._area_smooth = normalized_area
+            else:
+                self._area_smooth = 0.7 * self._area_smooth + 0.3 * normalized_area
+            area_for_ctrl = self._area_smooth
 
             fwd_cmd = 0.0
-            if normalized_area > cfg["backward_area_threshold"]:
+            if area_for_ctrl > cfg["backward_area_threshold"]:
                 fwd_cmd = cfg["backward_speed"]
                 LOGGER.info("Auto: Target too close, moving backward.")
-            elif normalized_area > cfg["stop_area_threshold"]:
+            elif area_for_ctrl > cfg["stop_area_threshold"]:
                 fwd_cmd = 0.0
                 LOGGER.info("Auto: Target at stop distance, holding position (no grasp).")
                 # Gripper yok: yaklaşınca sadece dur, TRACKING'de kal
                 self._set_drive(turn=0.0, forward=0.0)
                 return
-            elif normalized_area < cfg["approach_area_threshold"]:
-                 fwd_cmd = min(cfg["tracking_forward_speed_max"], max(5.0, (cfg["approach_area_threshold"] - normalized_area) * cfg["tracking_forward_gain"]))
+            elif area_for_ctrl < cfg["approach_area_threshold"]:
+                fwd_cmd = min(cfg["tracking_forward_speed_max"], max(5.0, (cfg["approach_area_threshold"] - area_for_ctrl) * cfg["tracking_forward_gain"]))
 
             if self.auto_forward_invert:
                 fwd_cmd = -fwd_cmd
@@ -1071,7 +1166,9 @@ class RobotController:
             self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
             
             self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
-            LOGGER.debug(f"Auto TRACKING: Target={color}, Area={normalized_area:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}")
+            LOGGER.debug(
+                f"Auto TRACKING: Target={color}, Area={area_for_ctrl:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}"
+            )
             return
 
         if state in (AutopilotState.APPROACHING, AutopilotState.GRASPING):
