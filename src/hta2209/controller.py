@@ -1197,9 +1197,9 @@ class RobotController:
             hysteresis = max(8.0, width * 0.04)
             zone_turn = self._tracking_zone
             if zone_turn == 0:
-                if raw_cx < x1 - hysteresis:
+                if raw_cx < x1:
                     zone_turn = -1
-                elif raw_cx > x2 + hysteresis:
+                elif raw_cx > x2:
                     zone_turn = 1
             elif zone_turn < 0:
                 if raw_cx > x1 + hysteresis:
