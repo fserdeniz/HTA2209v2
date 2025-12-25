@@ -1199,17 +1199,18 @@ class RobotController:
                 self.stop_wheels()
                 return
 
+            turn_cmd = max(
+                -cfg["tracking_turn_speed_max"],
+                min(cfg["tracking_turn_speed_max"], norm_err * cfg["tracking_turn_gain"]),
+            )
+            self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
+
             left_bound = frame_size[0] / 3.0
             right_bound = 2.0 * frame_size[0] / 3.0
             center_pos = self._cx_smooth if self._cx_smooth else cx
             centered = left_bound <= center_pos <= right_bound
 
             if not centered:
-                turn_cmd = max(
-                    -cfg["tracking_turn_speed_max"],
-                    min(cfg["tracking_turn_speed_max"], norm_err * cfg["tracking_turn_gain"]),
-                )
-                self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
                 self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
                 return
 
@@ -1241,12 +1242,10 @@ class RobotController:
                 if self.auto_forward_invert:
                     fwd_cmd = -fwd_cmd
                 self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
-                self._set_drive(turn=0.0, forward=self._drive_fwd_smooth)
+                self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
                 return
 
             # Fallback: area-based approach if dominant colors are unavailable
-            turn_cmd = max(-cfg["tracking_turn_speed_max"], min(cfg["tracking_turn_speed_max"], norm_err * cfg["tracking_turn_gain"]))
-
             # Forward/backward control based on area
             fwd_cmd = 0.0
             if area_for_ctrl > cfg["backward_area_threshold"]:
@@ -1264,7 +1263,6 @@ class RobotController:
             if self.auto_forward_invert:
                 fwd_cmd = -fwd_cmd
 
-            self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
             self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
 
             self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
