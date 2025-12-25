@@ -363,9 +363,9 @@ class HTAControlGUI:
         elif action == "backward":
             self._adjust_drive(-MANUAL_DRIVE_INCREMENT)
         elif action == "left":
-            self._adjust_turn(MANUAL_TURN_INCREMENT)
-        elif action == "right":
             self._adjust_turn(-MANUAL_TURN_INCREMENT)
+        elif action == "right":
+            self._adjust_turn(MANUAL_TURN_INCREMENT)
 
     def _adjust_drive(self, delta: float) -> None:
         if (not self.controller.is_running()) and (not self.controller.is_paused()):
@@ -614,6 +614,7 @@ class HTAControlGUI:
                 config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
                 self.picam.configure(config)
                 self._picam_color_order = "rgb"
+            self._sync_picam_color_order()
             self.picam.start()
             self.source_type_var.set("picam")
             self.camera_running = True
@@ -841,7 +842,12 @@ class HTAControlGUI:
                 raise RuntimeError("Picamera2 frame is None")
             # Kamera ters takili, 180 derece cevir
             frame = cv2.rotate(frame, cv2.ROTATE_180)
-            if self._picam_color_order == "rgb":
+            if frame.ndim == 3 and frame.shape[2] == 4:
+                if self._picam_color_order == "rgb":
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                else:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            elif self._picam_color_order == "rgb":
                 frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         except Exception as exc:
             self._camera_failures += 1
@@ -1156,10 +1162,10 @@ class HTAControlGUI:
             self._adjust_drive(-MANUAL_DRIVE_INCREMENT)
             return
         if keysym == "left":
-            self._adjust_turn(MANUAL_TURN_INCREMENT)
+            self._adjust_turn(-MANUAL_TURN_INCREMENT)
             return
         if keysym == "right":
-            self._adjust_turn(-MANUAL_TURN_INCREMENT)
+            self._adjust_turn(MANUAL_TURN_INCREMENT)
             return
         if keysym == "space":
             self._reset_manual_motion()
@@ -1222,6 +1228,19 @@ class HTAControlGUI:
         self.controller.set_auto_threshold_enabled(enabled)
 
     # ------------------------------------------------------------------ #
+    def _sync_picam_color_order(self) -> None:
+        if self.picam is None:
+            return
+        try:
+            cfg = self.picam.camera_configuration()
+        except Exception:
+            return
+        fmt = str(cfg.get("main", {}).get("format", "")).upper()
+        if "BGR" in fmt:
+            self._picam_color_order = "bgr"
+        elif "RGB" in fmt:
+            self._picam_color_order = "rgb"
+
     def _camera_backends(self) -> list[int]:
         if sys.platform.startswith("win"):
             return [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
