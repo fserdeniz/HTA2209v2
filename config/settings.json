@@ -37,13 +37,8 @@
     "scan_turn_speed": 30.0,
     "approach_area_threshold": 0.1,
     "stop_area_threshold": 0.15,
-    "backward_area_threshold": 0.2,
-    "backward_speed": -6.0,
-    "tracking_turn_gain": 20.0,
-    "tracking_forward_gain": 50.0,
     "tracking_turn_speed_max": 15.0,
-    "tracking_forward_speed_max": 15.0,
-    "tracking_deadband": 0.1
+    "tracking_forward_speed_max": 15.0
   },
   "thresholds": {
     "red": {

@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import messagebox, ttk, filedialog
+from tkinter import messagebox, ttk
 from tkinter import scrolledtext
 from pathlib import Path
 from typing import Dict
@@ -81,26 +81,15 @@ class HTAControlGUI:
         self._ensure_picamera2()
 
         # Bu sistemde yalnızca CSI portundaki Picamera2 kullanılacak
-        self.source_type_var = tk.StringVar(value="picam")
-        self.camera_index_var = tk.IntVar(value=0)
-        self.camera_choice_var = tk.StringVar(value="")
         self._camera_failures = 0
-        self._current_camera_index: int | None = None
         self.camera_status_var = tk.StringVar(value="Kamera kapali")
-        self.folder_path_var = tk.StringVar(value="")
-        self.video_path_var = tk.StringVar(value="")
         self.target_color_var = tk.StringVar(value="red")
         self.camera_label: ttk.Label | None = None
         self.camera_running = False
-        self.camera_capture: cv2.VideoCapture | None = None
         self.camera_loop_id: str | None = None
-        self.camera_combo: ttk.Combobox | None = None
         self._camera_photo = None
         self._last_frame = None
         self._auto_frame_counter = 0
-        self._folder_images: list[Path] = []
-        self._folder_index: int = 0
-        self._camera_devices: list[tuple[int, str]] = []
         self.ai_detection_var = tk.BooleanVar(value=False)
         self.ai_colors_var = tk.StringVar(value="")
         self.metric_labels: Dict[str, tk.StringVar] = {}
@@ -118,11 +107,6 @@ class HTAControlGUI:
         self.repo_root = Path(__file__).resolve().parents[2]
 
         self._create_widgets()
-        if not self.picam_supported:
-            self._refresh_camera_devices()
-        else:
-            # V4L2 taramasi yapma, dogrudan Picamera2 kullan
-            self.camera_choice_var.set("Picamera2")
         self.refresh_from_controller()
         self.root.bind_all("<KeyPress>", self._on_key_press)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -496,103 +480,11 @@ class HTAControlGUI:
             self.controller.set_joint_angle(joint, value)
             self.joint_labels[joint].set(f"{value:.0f}°")
 
-    # ------------------------------------------------------------------ #
-    def _select_video(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Video sec",
-            filetypes=[("Video Files", "*.mp4 *.avi *.mkv *.mov"), ("All Files", "*.*")],
-        )
-        if path:
-            self.video_path_var.set(path)
-            self.source_type_var.set("video")
-
-    def _select_folder(self) -> None:
-        path = filedialog.askdirectory(title="Resim klasoru sec")
-        if path:
-            self.folder_path_var.set(path)
-            self.source_type_var.set("folder")
-
-    # Camera discovery helpers ---------------------------------------- #
-    def _format_camera_label(self, index: int, name: str) -> str:
-        if sys.platform.startswith("win"):
-            return f"Kamera {index} - {name}"
-        elif sys.platform == "darwin":
-            return f"AVF {index} - {name}"
-        return f"/dev/video{index} - {name}"
-
-    def _is_capture_device(self, index: int) -> bool:
-        """Return True if device is a real capture node (skip ISP/codec/meta)."""
-        sys_path = Path(f"/sys/class/video4linux/video{index}")
-        driver = ""
-        driver_link = sys_path / "device/driver"
-        if driver_link.exists():
-            try:
-                driver = driver_link.resolve().name
-            except OSError:
-                driver = ""
-
-        # Known non-capture nodes to skip
-        skip_drivers = {
-            "bcm2835-codec",
-            "bcm2835-isp",
-            "rpi-hevc-dec",
-            # Unicam düğümlerini libcamera üzerinden kullanacağız; V4L2 capture denemeyelim
-            "unicam",
-        }
-        # Allow UVC (USB) capture drivers
-        allow_drivers = {"uvcvideo"}
-
-        try:
-            proc = subprocess.run(
-                ["v4l2-ctl", "-d", f"/dev/video{index}", "--info"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            # v4l2-ctl yoksa sadece driver filtresine göre karar ver
-            if driver and driver in skip_drivers:
-                return False
-            return not driver or driver in allow_drivers
-
-        if proc.returncode != 0:
-            return False
-        stdout = proc.stdout
-
-        # Filter by driver name from v4l2-ctl if available
-        if "Driver name" in stdout:
-            driver_name = stdout.split("Driver name", 1)[1]
-            if any(skip in driver_name for skip in skip_drivers):
-                return False
-
-        has_capture = "Device Caps" in stdout and "Video Capture" in stdout.split("Device Caps", 1)[1]
-        return has_capture
-
     def _refresh_camera_devices(self) -> None:
-        # Yalnızca Picamera2 destekleniyor; USB taraması yapılmaz.
-        self._camera_devices = []
         if self.picam_supported:
-            self.camera_choice_var.set("Picamera2")
             self.camera_status_var.set("Picamera2 hazir")
         else:
-            self.camera_choice_var.set("Picamera2 bulunamadi")
             self.camera_status_var.set("Picamera2 bulunamadi")
-        self._update_camera_combo()
-
-    def _update_camera_combo(self) -> None:
-        # Picamera2 haric kaynak yok; combobox kullanılmıyor.
-        if self.camera_combo is None:
-            return
-        self.camera_combo["values"] = []
-
-    def _on_camera_choice(self, _event=None) -> None:
-        choice = self.camera_choice_var.get()
-        for idx, name in self._camera_devices:
-            if choice.startswith(f"/dev/video{idx}") or choice.startswith(f"Kamera {idx}") or choice.startswith(
-                f"AVF {idx}"
-            ):
-                self.camera_index_var.set(idx)
-                return
 
     def _start_stream(self) -> None:
         self._stop_stream()
@@ -616,10 +508,8 @@ class HTAControlGUI:
                 self._picam_color_order = "bgr"
             self._sync_picam_color_order()
             self.picam.start()
-            self.source_type_var.set("picam")
             self.camera_running = True
             self._camera_failures = 0
-            self._current_camera_index = None
             self.camera_status_var.set("Kamera açık (Picamera2 1280x720)")
             self._update_picam_frame()
             return
@@ -632,9 +522,6 @@ class HTAControlGUI:
         if self.camera_loop_id is not None:
             self.root.after_cancel(self.camera_loop_id)
             self.camera_loop_id = None
-        if self.camera_capture is not None:
-            self.camera_capture.release()
-            self.camera_capture = None
         if self.picam is not None:
             try:
                 self.picam.stop()
@@ -645,10 +532,7 @@ class HTAControlGUI:
             self.camera_label.configure(image="", text="Onizleme yok")
         self._camera_photo = None
         self._last_frame = None
-        self._folder_images = []
-        self._folder_index = 0
         self._camera_failures = 0
-        self._current_camera_index = None
 
     def _apply_preview_guides(self, frame):
         if frame is None or frame.size == 0:
@@ -662,191 +546,6 @@ class HTAControlGUI:
         cv2.line(frame, (x1, 0), (x1, height - 1), guide_color, 1)
         cv2.line(frame, (x2, 0), (x2, height - 1), guide_color, 1)
         return frame
-
-    def _update_camera_frame(self) -> None:
-        if not self.camera_running:
-            return
-
-        source = self.source_type_var.get()
-        if source == "picam":
-            self._update_picam_frame()
-            return
-        if source == "folder":
-            self._update_folder_frame()
-            return
-        if self.camera_capture is None:
-            return
-
-        ret, frame = self.camera_capture.read()
-        if not ret:
-            if source == "video":
-                self.camera_status_var.set("Video bitti")
-                self._stop_stream()
-            else:
-                self._camera_failures += 1
-                # Sık aç/kapa yapmamak için sadece bekle ve yeniden dene
-                self.camera_status_var.set(
-                    f"Kare okunamadi, tekrar denenecek... (deneme {self._camera_failures})"
-                )
-                self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_camera_frame)
-            return
-        self._camera_failures = 0
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        if self.controller.camera_swap_rb:
-            frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-        self._last_frame = frame_rgb
-        display_frame = frame_rgb
-        colors = []
-
-        if self.ai_detection_var.get():
-            overlay, colors = detector.analyze_frame(self._last_frame)
-            display_frame = overlay
-            if colors:
-                color_names = ", ".join([c[0] for c in colors])
-                self.ai_colors_var.set(f"Dominant renkler: {color_names}")
-            else:
-                self.ai_colors_var.set("Dominant renk bulunamadi")
-        else:
-            self.ai_colors_var.set("")
-
-        dominant_list = [c[0] for c in colors] if colors else None
-        self.controller.set_dominant_colors_hint(dominant_list)
-
-        if not self.controller.is_manual():
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-            self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
-            if self.controller.last_target:
-                lt = self.controller.last_target
-                cx, cy, area = lt[0], lt[1], lt[2]
-                depth = lt[3] if len(lt) > 3 else None
-                mask_ratio = lt[4] if len(lt) > 4 else None
-                target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
-                color_map = {
-                    "red": (255, 0, 0),
-                    "green": (0, 255, 0),
-                    "blue": (0, 0, 255),
-                    "yellow": (255, 255, 0),
-                    "orange": (255, 165, 0),
-                    "purple": (255, 0, 255),
-                    "cyan": (0, 255, 255),
-                }
-                rgb = color_map.get(target_color or "yellow", (0, 255, 0))
-                cv2.circle(display_frame, (cx, cy), 8, rgb, 2)
-                label = f"X={cx}, Y={cy}"
-                if depth is not None:
-                    label += f", Z~{depth:.2f}"
-                if mask_ratio is not None:
-                    label += f", oran={mask_ratio:.2f}"
-                cv2.putText(
-                    display_frame,
-                    label,
-                    (cx + 10, max(20, cy - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    rgb,
-                    2,
-                )
-            # Simulasyon modunda da PWM/matrixleri canlı görmek için yenile
-            self.refresh_from_controller()
-
-        display_frame = self._apply_preview_guides(display_frame)
-        image = Image.fromarray(display_frame)
-        image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(image=image)
-        if self.camera_label is not None:
-            self.camera_label.configure(image=photo, text="")
-            self.camera_label.image = photo  # type: ignore[attr-defined]
-        self._camera_photo = photo
-
-        self._auto_frame_counter += 1
-        if self.controller.auto_threshold_enabled and self._auto_frame_counter % 10 == 0:
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-            self.controller.auto_calibrate_from_frame(hsv)
-            self._refresh_threshold_fields()
-
-        self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_camera_frame)
-
-    def _update_folder_frame(self) -> None:
-        if not self.camera_running or not self._folder_images:
-            return
-        image_path = self._folder_images[self._folder_index]
-        frame = cv2.imread(str(image_path))
-        if frame is None:
-            self.camera_status_var.set(f"Resim okunamadi: {image_path.name}")
-            self.ai_colors_var.set("")
-        else:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            if self.controller.camera_swap_rb:
-                frame_rgb = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-            self._last_frame = frame_rgb
-            display_frame = frame_rgb
-            colors = []
-            if self.ai_detection_var.get():
-                overlay, colors = detector.analyze_frame(self._last_frame)
-                display_frame = overlay
-                if colors:
-                    color_names = ", ".join([c[0] for c in colors])
-                    self.ai_colors_var.set(f"Dominant renkler: {color_names}")
-                else:
-                    self.ai_colors_var.set("Dominant renk bulunamadi")
-            else:
-                self.ai_colors_var.set("")
-
-            dominant_list = [c[0] for c in colors] if colors else None
-            self.controller.set_dominant_colors_hint(dominant_list)
-
-            if not self.controller.is_manual():
-                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-                self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
-                if self.controller.last_target:
-                    lt = self.controller.last_target
-                    cx, cy, area = lt[0], lt[1], lt[2]
-                    depth = lt[3] if len(lt) > 3 else None
-                    mask_ratio = lt[4] if len(lt) > 4 else None
-                    target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
-                    color_map = {
-                        "red": (255, 0, 0),
-                        "green": (0, 255, 0),
-                        "blue": (0, 0, 255),
-                        "yellow": (255, 255, 0),
-                        "orange": (255, 165, 0),
-                        "purple": (255, 0, 255),
-                        "cyan": (0, 255, 255),
-                    }
-                    rgb = color_map.get(target_color or "yellow", (0, 255, 0))
-                    cv2.circle(display_frame, (cx, cy), 8, rgb, 2)
-                    label = f"X={cx}, Y={cy}"
-                    if depth is not None:
-                        label += f", Z~{depth:.2f}"
-                    if mask_ratio is not None:
-                        label += f", oran={mask_ratio:.2f}"
-                    cv2.putText(
-                        display_frame,
-                        label,
-                        (cx + 10, max(20, cy - 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        rgb,
-                        2,
-                    )
-                self.refresh_from_controller()
-
-            display_frame = self._apply_preview_guides(display_frame)
-            image = Image.fromarray(display_frame)
-            image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(image=image)
-            if self.camera_label is not None:
-                self.camera_label.configure(image=photo, text="")
-                self.camera_label.image = photo  # type: ignore[attr-defined]
-            self._camera_photo = photo
-
-            if self.controller.auto_threshold_enabled and self._auto_frame_counter % 2 == 0:
-                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-                self.controller.auto_calibrate_from_frame(hsv)
-                self._refresh_threshold_fields()
-        self._auto_frame_counter += 1
-        self._folder_index = (self._folder_index + 1) % len(self._folder_images)
-        self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_folder_frame)
 
     def _update_picam_frame(self) -> None:
         if not self.camera_running or self.picam is None:
@@ -1253,40 +952,6 @@ class HTAControlGUI:
             self._picam_color_order = "bgr"
         elif "RGB" in fmt:
             self._picam_color_order = "rgb"
-
-    def _camera_backends(self) -> list[int]:
-        if sys.platform.startswith("win"):
-            return [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-        if sys.platform == "darwin":
-            return [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
-        return [cv2.CAP_V4L2, cv2.CAP_ANY]
-
-    def _check_camera_available(self, index: int) -> bool:
-        cap = self._open_camera_capture(index)
-        if cap is None:
-            return False
-        cap.release()
-        return True
-
-    def _open_camera_capture(self, index: int) -> cv2.VideoCapture | None:
-        """Open camera with a safe default format and verify frame read."""
-        for backend in self._camera_backends():
-            cap = cv2.VideoCapture(index, backend)
-            if not cap.isOpened():
-                cap.release()
-                continue
-            # Safer defaults for USB2 cams (Linux). Windows/mac'te varsayilan format kullan
-            if not sys.platform.startswith("win") and sys.platform != "darwin":
-                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            cap.set(cv2.CAP_PROP_FPS, 10)
-            for _ in range(3):
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    return cap
-            cap.release()
-        return None
 
     def _manual_auto_calibrate(self) -> None:
         if self._last_frame is None:

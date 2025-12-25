@@ -170,7 +170,6 @@ class RobotController:
         self.autopilot_state: AutopilotState = AutopilotState.IDLE
         self.auto_state_started_at: float = 0.0
         self.auto_scan_step: int = 0
-        self.auto_detect_hits: int = 0
         self.supply_voltage: float = 5.0
         self.supply_current: float = 0.0
         self.power_consumption_w: float = 0.0
@@ -178,22 +177,11 @@ class RobotController:
         self.pwm_output: Dict[str, float] = {wheel: 0.0 for wheel in WHEEL_CHANNELS}
         self.gripper_burst_until: float = 0.0
         self.gripper_reverse_until: float = 0.0
-        self._target_was_visible: bool = False
-        self.gripper_cooldown_until: float = 0.0
         self._last_auto_calib: float = 0.0
-        self._coverage_smooth: float = 0.0
         self._area_smooth: float = 0.0
-        self._last_seen_time: float = 0.0
         self._cx_smooth: float = 0.0
-        self._cy_smooth: float = 0.0
-        self._last_drive_time: float = 0.0
-        self._last_drive_cmd: Tuple[float, float] = (0.0, 0.0)
-        self._gripper_armed: bool = True
-        self._gripper_fired: bool = False
         self._drive_turn_smooth: float = 0.0
         self._drive_fwd_smooth: float = 0.0
-        self._scan_turning_until: float = 0.0
-        self._scan_next_turn_at: float = 0.0
         self._blue_release_cooldown: float = 0.0
         self._blue_confirm_hits: int = 0
         self._blue_last_seen_time: float = 0.0
@@ -530,13 +518,8 @@ class RobotController:
             "scan_turn_speed": 45.0,
             "approach_area_threshold": 0.1,
             "stop_area_threshold": 0.15,
-            "backward_area_threshold": 0.2,
-            "backward_speed": -6.0,
-            "tracking_turn_gain": 20.0,
-            "tracking_forward_gain": 50.0,
             "tracking_turn_speed_max": 15.0,
             "tracking_forward_speed_max": 15.0,
-            "tracking_deadband": 0.1,
         }
         autopilot_conf = raw.get("autopilot", {})
         for key, val in autopilot_conf.items():
@@ -626,22 +609,11 @@ class RobotController:
             self.set_continuous_speed(joint, 0)
         self.gripper_burst_until = 0.0
         self.gripper_reverse_until = 0.0
-        self._target_was_visible = False
-        self.gripper_cooldown_until = 0.0
         self._last_auto_calib = 0.0
-        self._coverage_smooth = 0.0
         self._area_smooth = 0.0
-        self._last_seen_time = 0.0
         self._cx_smooth = 0.0
-        self._cy_smooth = 0.0
-        self._last_drive_time = 0.0
-        self._last_drive_cmd = (0.0, 0.0)
-        self._gripper_armed = True
-        self._gripper_fired = False
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
-        self._scan_turning_until = 0.0
-        self._scan_next_turn_at = 0.0
         self._blue_release_cooldown = 0.0
         self._blue_confirm_hits = 0
         self._blue_last_seen_time = 0.0
@@ -962,23 +934,15 @@ class RobotController:
         self.autopilot_state = AutopilotState.IDLE
         self.auto_state_started_at = 0.0
         self.auto_scan_step = 0
-        self.auto_detect_hits = 0
         self.last_target = None
         self.last_target_color = None
         self.gripper_burst_until = 0.0
         self.gripper_reverse_until = 0.0
-        self._target_was_visible = False
-        self.gripper_cooldown_until = 0.0
         self._last_auto_calib = 0.0
-        self._coverage_smooth = 0.0
         self._area_smooth = 0.0
-        self._last_seen_time = 0.0
         self._cx_smooth = 0.0
-        self._cy_smooth = 0.0
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
-        self._scan_turning_until = 0.0
-        self._scan_next_turn_at = 0.0
         self._blue_release_cooldown = 0.0
         self._blue_confirm_hits = 0
         self._blue_last_seen_time = 0.0
@@ -1181,15 +1145,8 @@ class RobotController:
             if self._cx_smooth == 0: self._cx_smooth = cx
             else: self._cx_smooth = alpha * self._cx_smooth + (1 - alpha) * cx
 
-            center_x = frame_size[0] // 2
-            error_x = cx - center_x
-            norm_err = max(-1.0, min(1.0, error_x / (frame_size[0] / 2)))
-
             # --- Motion control ---
             cfg = self.autopilot_config
-            if abs(norm_err) < cfg["tracking_deadband"]:
-                norm_err = 0.0
-
             frame_area = frame_size[0] * frame_size[1]
             normalized_area = area / frame_area
             if self._area_smooth == 0.0:
