@@ -1170,13 +1170,13 @@ class RobotController:
 
             cx, cy, area, depth_norm, mask_ratio, color = best_target
             
-            # Smooth the target position
+            # Keep a smoothed position for stability (raw cx used for turning)
             alpha = 0.4
             if self._cx_smooth == 0: self._cx_smooth = cx
             else: self._cx_smooth = alpha * self._cx_smooth + (1 - alpha) * cx
 
             center_x = frame_size[0] // 2
-            error_x = self._cx_smooth - center_x
+            error_x = cx - center_x
             norm_err = max(-1.0, min(1.0, error_x / (frame_size[0] / 2)))
 
             # --- Motion control ---
@@ -1207,7 +1207,7 @@ class RobotController:
 
             left_bound = frame_size[0] / 3.0
             right_bound = 2.0 * frame_size[0] / 3.0
-            center_pos = self._cx_smooth if self._cx_smooth else cx
+            center_pos = cx
             centered = left_bound <= center_pos <= right_bound
 
             if not centered:
