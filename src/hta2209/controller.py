@@ -523,9 +523,9 @@ class RobotController:
 
         # Autopilot ayarlarını yükle
         self.autopilot_config = {
-            "scan_initial_wait": 0.5,
+            "scan_initial_wait": 0.3,
             "scan_rotate_duration": 0.6,   # ~45° adim
-            "scan_hold_duration": 1.4,     # 2 sn toplam dongu
+            "scan_hold_duration": 1.0,     # 2 sn toplam dongu
             "scan_steps": 9999,            # surekli tarama
             "scan_turn_speed": 45.0,
             "approach_area_threshold": 0.1,
@@ -696,50 +696,33 @@ class RobotController:
         self.auto_threshold_enabled = bool(enabled)
         LOGGER.info("Otomatik esikleme %s.", "acik" if self.auto_threshold_enabled else "kapali")
 
-    def auto_calibrate_from_frame(self, hsv_frame: np.ndarray, low_pct: float = 5.0, high_pct: float = 95.0) -> None:
+    def auto_calibrate_from_frame(self, hsv_frame: np.ndarray, low_pct: float = 5.0, _high_pct: float = 95.0) -> None:
         if hsv_frame.size == 0:
             LOGGER.warning("Auto calibrate: bos kare.")
             return
         sat = hsv_frame[:, :, 1].astype(np.float32).ravel()
         val = hsv_frame[:, :, 2].astype(np.float32).ravel()
         # Ortam aydinligina gore (V ortalama / std) min-max belirle
-        v_mean = float(np.mean(val))
-        v_std = float(np.std(val))
         sat_min = float(np.percentile(sat, low_pct))
-        sat_max = float(np.percentile(sat, high_pct))
-        v_span = max(10.0, v_std * 1.5)
-        val_min = v_mean - v_span
-        val_max = v_mean + v_span
+        val_min = float(np.percentile(val, low_pct))
 
         sat_min = int(max(0.0, min(255.0, sat_min)))
-        sat_max = int(max(0.0, min(255.0, sat_max)))
-        if sat_max <= sat_min:
-            sat_min = max(0, sat_min - 10)
-            sat_max = min(255, sat_max + 10)
-        if sat_max <= sat_min:
-            sat_min, sat_max = 0, 255
-
         val_min = int(max(0.0, min(255.0, val_min)))
-        val_max = int(max(0.0, min(255.0, val_max)))
-        if val_max <= val_min:
-            val_min = max(0, int(v_mean) - 10)
-            val_max = min(255, int(v_mean) + 10)
-        if val_max <= val_min:
-            val_min, val_max = 0, 255
+
+        sat_min = max(40, min(200, sat_min))
+        val_min = max(40, min(200, val_min))
         for thr in self.color_thresholds.values():
             thr.sat_min = sat_min
-            thr.sat_max = sat_max
             thr.val_min = val_min
-            thr.val_max = val_max
+            if thr.sat_max <= thr.sat_min:
+                thr.sat_max = min(255, thr.sat_min + 10)
+            if thr.val_max <= thr.val_min:
+                thr.val_max = min(255, thr.val_min + 10)
             thr.clamp()
         LOGGER.debug(
-            "Auto threshold (ambient) sat [%s-%s], val [%s-%s], Vmean=%.1f std=%.1f",
+            "Auto threshold (ambient) sat_min %s, val_min %s",
             sat_min,
-            sat_max,
             val_min,
-            val_max,
-            v_mean,
-            v_std,
         )
 
     def set_dominant_colors_hint(self, colors: Optional[Sequence[str]]) -> None:

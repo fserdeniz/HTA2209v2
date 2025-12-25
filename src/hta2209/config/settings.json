@@ -37,9 +37,9 @@
       "hue_min": 45,
       "hue_max": 90,
       "sat_min": 60,
-      "sat_max": 235,
+      "sat_max": 255,
       "val_min": 40,
-      "val_max": 146
+      "val_max": 255
     },
     "blue": {
       "hue_min": 100,
@@ -61,25 +61,25 @@
       "hue_min": 5,
       "hue_max": 25,
       "sat_min": 60,
-      "sat_max": 235,
+      "sat_max": 255,
       "val_min": 40,
-      "val_max": 146
+      "val_max": 255
     },
     "purple": {
       "hue_min": 130,
       "hue_max": 165,
       "sat_min": 60,
-      "sat_max": 235,
+      "sat_max": 255,
       "val_min": 40,
-      "val_max": 146
+      "val_max": 255
     },
     "cyan": {
       "hue_min": 80,
       "hue_max": 100,
       "sat_min": 60,
-      "sat_max": 235,
+      "sat_max": 255,
       "val_min": 40,
-      "val_max": 146
+      "val_max": 255
     }
   }
 }
