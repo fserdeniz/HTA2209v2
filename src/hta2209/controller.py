@@ -134,6 +134,7 @@ class RobotController:
         self._gpio_initialized = False
         self.l298n_pins: Dict[str, int] = dict(DEFAULT_L298N_PINS)
         self.l298n_invert_right: bool = True
+        self.l298n_swap_sides: bool = False
 
         self.wheel_state: Dict[str, float] = {wheel: 0.0 for wheel in WHEEL_CHANNELS}
         self.wheel_polarity: Dict[str, int] = {wheel: 1 for wheel in WHEEL_CHANNELS}
@@ -344,8 +345,11 @@ class RobotController:
             LOGGER.debug("L298N %s duty %.1f", side_name, duty)
 
         try:
-            drive_side(left, self._ena_pwm, self.l298n_pins["in1"], self.l298n_pins["in2"], "SOL")
+            left_cmd = left
             right_cmd = -right if self.l298n_invert_right else right
+            if self.l298n_swap_sides:
+                left_cmd, right_cmd = right_cmd, left_cmd
+            drive_side(left_cmd, self._ena_pwm, self.l298n_pins["in1"], self.l298n_pins["in2"], "SOL")
             drive_side(right_cmd, self._enb_pwm, self.l298n_pins["in3"], self.l298n_pins["in4"], "SAG")
         except Exception as exc:  # pragma: no cover
             LOGGER.error("L298N hiz uygulanamadi: %s", exc)
@@ -423,6 +427,7 @@ class RobotController:
             "servo_channels": self.servo_channels,
             "l298n_pins": dict(self.l298n_pins),
             "l298n_invert_right": self.l298n_invert_right,
+            "l298n_swap_sides": self.l298n_swap_sides,
             "autopilot": dict(self.autopilot_config),
             "thresholds": {color: thr.as_dict() for color, thr in self.color_thresholds.items()},
         }
@@ -466,6 +471,8 @@ class RobotController:
                     pass
         if "l298n_invert_right" in raw:
             self.l298n_invert_right = bool(raw.get("l298n_invert_right"))
+        if "l298n_swap_sides" in raw:
+            self.l298n_swap_sides = bool(raw.get("l298n_swap_sides"))
         # Opsiyonel servo kanal konfigurasyonu
         servo_ch = raw.get("servo_channels", {})
         for joint, ch in servo_ch.items():

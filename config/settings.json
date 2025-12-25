@@ -24,6 +24,8 @@
     "joint": 0,
     "gripper": 3
   },
+  "l298n_invert_right": true,
+  "l298n_swap_sides": true,
   "autopilot": {
     "scan_initial_wait": 3.0,
     "scan_rotate_duration": 0.5,
