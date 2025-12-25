@@ -189,6 +189,8 @@ class RobotController:
         self._blue_last_pos: Optional[Tuple[int, int]] = None
         self._target_hold_until: float = 0.0
         self._target_smooth_color: Optional[str] = None
+        self._target_raw_pos: Optional[Tuple[int, int]] = None
+        self._target_raw_color: Optional[str] = None
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -624,6 +626,8 @@ class RobotController:
         self._blue_last_pos = None
         self._target_hold_until = 0.0
         self._target_smooth_color = None
+        self._target_raw_pos = None
+        self._target_raw_color = None
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
         if self.hbridge_ready and GPIO is not None:
@@ -838,22 +842,22 @@ class RobotController:
         if thr is None:
             return mask, None, 0.0
         frame_area = float(mask.shape[0] * mask.shape[1])
-        min_area = max(120.0, frame_area * 0.002)
+        min_area = max(120.0, frame_area * 0.001)
         if cv2.countNonZero(mask) < min_area:
             return mask, None, 0.0
-        if not self._validate_mask_color(hsv_frame, mask, thr, ranges, sat_floor=80, val_floor=60):
+        if not self._validate_mask_color(hsv_frame, mask, thr, ranges, sat_floor=70, val_floor=50):
             return mask, None, 0.0
 
         sat = hsv_frame[:, :, 1].astype(np.float32) / 255.0
         val = hsv_frame[:, :, 2].astype(np.float32) / 255.0
         weight = (mask.astype(np.float32) / 255.0) * (0.6 * sat + 0.4 * val)
         min_dim = min(mask.shape[:2])
-        kernel = max(11, int(min_dim * 0.05))
+        kernel = max(9, int(min_dim * 0.035))
         if kernel % 2 == 0:
             kernel += 1
         density = cv2.blur(weight, (kernel, kernel))
         _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(density)
-        if max_val < 0.03:
+        if max_val < 0.02:
             return mask, None, 0.0
 
         num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -933,6 +937,8 @@ class RobotController:
         self._blue_last_pos = None
         self._target_hold_until = 0.0
         self._target_smooth_color = None
+        self._target_raw_pos = None
+        self._target_raw_color = None
 
     def _trigger_blue_release(self, now: float) -> bool:
         """Open gripper when blue balloon is seen."""
@@ -1057,6 +1063,8 @@ class RobotController:
         blue_confirmed = self._confirm_blue_candidate(hsv_proc, blue_mask, blue_candidate, frame_size, now)
         if best_target:
             cx, cy, area, depth_norm, mask_ratio, color = best_target
+            self._target_raw_pos = (cx, cy)
+            self._target_raw_color = color
             if self._target_smooth_color != color:
                 self._cx_smooth = float(cx)
                 self._cy_smooth = float(cy)
@@ -1084,6 +1092,8 @@ class RobotController:
                 self.last_target = None
                 self.last_target_color = None
                 self._target_smooth_color = None
+                self._target_raw_pos = None
+                self._target_raw_color = None
 
         # --- State Machine ---
         state = self.autopilot_state
@@ -1166,15 +1176,19 @@ class RobotController:
                 self.stop_wheels()
                 return
 
+            raw_cx = cx
+            if self._target_raw_pos is not None:
+                if self._target_raw_color is None or self._target_raw_color == color:
+                    raw_cx = self._target_raw_pos[0]
             width = frame_size[0]
             if width <= 0:
                 self.stop_wheels()
                 return
             x1 = width / 3.0
             x2 = 2.0 * width / 3.0
-            if cx < x1:
+            if raw_cx < x1:
                 zone_turn = -1.0
-            elif cx > x2:
+            elif raw_cx > x2:
                 zone_turn = 1.0
             else:
                 zone_turn = 0.0
