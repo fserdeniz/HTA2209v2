@@ -77,7 +77,7 @@ class HTAControlGUI:
 
         self.picam_supported = False
         self.picam: Picamera2 | None = None
-        self._picam_color_order = "bgr"
+        self._picam_color_order = "rgb"
         self._ensure_picamera2()
 
         # Bu sistemde yalnızca CSI portundaki Picamera2 kullanılacak
@@ -606,14 +606,14 @@ class HTAControlGUI:
         try:
             if self.picam is None:
                 self.picam = Picamera2()
-            self._picam_color_order = "bgr"
+            self._picam_color_order = "rgb"
             try:
-                config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "BGR888"})
-                self.picam.configure(config)
-            except Exception:
                 config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
                 self.picam.configure(config)
-                self._picam_color_order = "rgb"
+            except Exception:
+                config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "BGR888"})
+                self.picam.configure(config)
+                self._picam_color_order = "bgr"
             self._sync_picam_color_order()
             self.picam.start()
             self.source_type_var.set("picam")
@@ -678,11 +678,12 @@ class HTAControlGUI:
                 self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_camera_frame)
             return
         self._camera_failures = 0
-        self._last_frame = frame.copy()
-        display_frame = frame
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        self._last_frame = frame_rgb
+        display_frame = frame_rgb
 
         if self.ai_detection_var.get():
-            overlay, colors = detector.analyze_frame(frame)
+            overlay, colors = detector.analyze_frame(self._last_frame)
             display_frame = overlay
             if colors:
                 color_names = ", ".join([c[0] for c in colors])
@@ -699,7 +700,7 @@ class HTAControlGUI:
                 dominant_list = [n.strip() for n in names.split(",") if n.strip()]
 
         if not self.controller.is_manual():
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
             self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
             if self.controller.last_target:
                 lt = self.controller.last_target
@@ -708,16 +709,16 @@ class HTAControlGUI:
                 mask_ratio = lt[4] if len(lt) > 4 else None
                 target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
                 color_map = {
-                    "red": (0, 0, 255),
+                    "red": (255, 0, 0),
                     "green": (0, 255, 0),
-                    "blue": (255, 0, 0),
-                    "yellow": (0, 255, 255),
-                    "orange": (0, 165, 255),
+                    "blue": (0, 0, 255),
+                    "yellow": (255, 255, 0),
+                    "orange": (255, 165, 0),
                     "purple": (255, 0, 255),
-                    "cyan": (255, 255, 0),
+                    "cyan": (0, 255, 255),
                 }
-                bgr = color_map.get(target_color or "yellow", (0, 255, 0))
-                cv2.circle(display_frame, (cx, cy), 8, bgr, 2)
+                rgb = color_map.get(target_color or "yellow", (0, 255, 0))
+                cv2.circle(display_frame, (cx, cy), 8, rgb, 2)
                 label = f"X={cx}, Y={cy}"
                 if depth is not None:
                     label += f", Z~{depth:.2f}"
@@ -729,14 +730,13 @@ class HTAControlGUI:
                     (cx + 10, max(20, cy - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    bgr,
+                    rgb,
                     2,
                 )
             # Simulasyon modunda da PWM/matrixleri canlı görmek için yenile
             self.refresh_from_controller()
 
-        rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb)
+        image = Image.fromarray(display_frame)
         image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image=image)
         if self.camera_label is not None:
@@ -746,7 +746,7 @@ class HTAControlGUI:
 
         self._auto_frame_counter += 1
         if self.controller.auto_threshold_enabled and self._auto_frame_counter % 10 == 0:
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
             self.controller.auto_calibrate_from_frame(hsv)
             self._refresh_threshold_fields()
 
@@ -761,10 +761,11 @@ class HTAControlGUI:
             self.camera_status_var.set(f"Resim okunamadi: {image_path.name}")
             self.ai_colors_var.set("")
         else:
-            self._last_frame = frame.copy()
-            display_frame = frame
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            self._last_frame = frame_rgb
+            display_frame = frame_rgb
             if self.ai_detection_var.get():
-                overlay, colors = detector.analyze_frame(frame)
+                overlay, colors = detector.analyze_frame(self._last_frame)
                 display_frame = overlay
                 if colors:
                     color_names = ", ".join([c[0] for c in colors])
@@ -781,7 +782,7 @@ class HTAControlGUI:
                     dominant_list = [n.strip() for n in names.split(",") if n.strip()]
 
             if not self.controller.is_manual():
-                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
+                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
                 self.controller.autopilot_step(hsv, (frame.shape[1], frame.shape[0]))
                 if self.controller.last_target:
                     lt = self.controller.last_target
@@ -790,16 +791,16 @@ class HTAControlGUI:
                     mask_ratio = lt[4] if len(lt) > 4 else None
                     target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
                     color_map = {
-                        "red": (0, 0, 255),
+                        "red": (255, 0, 0),
                         "green": (0, 255, 0),
-                        "blue": (255, 0, 0),
-                        "yellow": (0, 255, 255),
-                        "orange": (0, 165, 255),
+                        "blue": (0, 0, 255),
+                        "yellow": (255, 255, 0),
+                        "orange": (255, 165, 0),
                         "purple": (255, 0, 255),
-                        "cyan": (255, 255, 0),
+                        "cyan": (0, 255, 255),
                     }
-                    bgr = color_map.get(target_color or "yellow", (0, 255, 0))
-                    cv2.circle(display_frame, (cx, cy), 8, bgr, 2)
+                    rgb = color_map.get(target_color or "yellow", (0, 255, 0))
+                    cv2.circle(display_frame, (cx, cy), 8, rgb, 2)
                     label = f"X={cx}, Y={cy}"
                     if depth is not None:
                         label += f", Z~{depth:.2f}"
@@ -811,13 +812,12 @@ class HTAControlGUI:
                         (cx + 10, max(20, cy - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.6,
-                        bgr,
+                        rgb,
                         2,
                     )
                 self.refresh_from_controller()
 
-            rgb = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(rgb)
+            image = Image.fromarray(display_frame)
             image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
             photo = ImageTk.PhotoImage(image=image)
             if self.camera_label is not None:
@@ -826,7 +826,7 @@ class HTAControlGUI:
             self._camera_photo = photo
 
             if self.controller.auto_threshold_enabled and self._auto_frame_counter % 2 == 0:
-                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
+                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
                 self.controller.auto_calibrate_from_frame(hsv)
                 self._refresh_threshold_fields()
         self._auto_frame_counter += 1
@@ -844,11 +844,11 @@ class HTAControlGUI:
             frame = cv2.rotate(frame, cv2.ROTATE_180)
             if frame.ndim == 3 and frame.shape[2] == 4:
                 if self._picam_color_order == "rgb":
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
                 else:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
-            elif self._picam_color_order == "rgb":
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+            elif self._picam_color_order == "bgr":
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         except Exception as exc:
             self._camera_failures += 1
             if self._camera_failures >= 5:
@@ -859,7 +859,7 @@ class HTAControlGUI:
             return
 
         self._camera_failures = 0
-        # Normalize Picamera2 output to BGR for the OpenCV pipeline.
+        # Normalize Picamera2 output to RGB for the OpenCV pipeline.
         self._last_frame = frame
         display_frame = self._last_frame
 
@@ -881,7 +881,7 @@ class HTAControlGUI:
                 dominant_list = [n.strip() for n in names.split(",") if n.strip()]
 
         if not self.controller.is_manual():
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
             self.controller.autopilot_step(hsv, (display_frame.shape[1], display_frame.shape[0]))
             if self.controller.last_target:
                 lt = self.controller.last_target
@@ -890,16 +890,16 @@ class HTAControlGUI:
                 mask_ratio = lt[4] if len(lt) > 4 else None
                 target_color = self.controller.last_target_color or (lt[5] if len(lt) > 5 else None)
                 color_map = {
-                    "red": (0, 0, 255),
+                    "red": (255, 0, 0),
                     "green": (0, 255, 0),
-                    "blue": (255, 0, 0),
-                    "yellow": (0, 255, 255),
-                    "orange": (0, 165, 255),
+                    "blue": (0, 0, 255),
+                    "yellow": (255, 255, 0),
+                    "orange": (255, 165, 0),
                     "purple": (255, 0, 255),
-                    "cyan": (255, 255, 0),
+                    "cyan": (0, 255, 255),
                 }
-                bgr = color_map.get(target_color or "yellow", (0, 255, 0))
-                cv2.circle(display_frame, (cx, cy), 8, bgr, 2)
+                rgb = color_map.get(target_color or "yellow", (0, 255, 0))
+                cv2.circle(display_frame, (cx, cy), 8, rgb, 2)
                 label = f"X={cx}, Y={cy}"
                 if depth is not None:
                     label += f", Z~{depth:.2f}"
@@ -911,13 +911,12 @@ class HTAControlGUI:
                     (cx + 10, max(20, cy - 10)),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
-                    bgr,
+                    rgb,
                     2,
                 )
             self.refresh_from_controller()
 
-        rgb_for_display = cv2.cvtColor(display_frame, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(rgb_for_display)
+        image = Image.fromarray(display_frame)
         image = image.resize(CAMERA_PREVIEW_SIZE, Image.Resampling.LANCZOS)
         photo = ImageTk.PhotoImage(image=image)
         if self.camera_label is not None:
@@ -927,7 +926,7 @@ class HTAControlGUI:
 
         self._auto_frame_counter += 1
         if self.controller.auto_threshold_enabled and self._auto_frame_counter % 10 == 0:
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
             self.controller.auto_calibrate_from_frame(hsv)
             self._refresh_threshold_fields()
 
@@ -1279,7 +1278,7 @@ class HTAControlGUI:
         if self._last_frame is None:
             messagebox.showerror("Kamera", "Kamera acik degil veya kare yok.")
             return
-        hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_BGR2HSV)
+        hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
         self.controller.auto_calibrate_from_frame(hsv)
         self._refresh_threshold_fields()
         messagebox.showinfo("Otomatik", "S/V esikleri guncellendi (guncel kare).")

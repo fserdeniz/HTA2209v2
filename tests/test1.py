@@ -30,15 +30,15 @@ def stop():
 
 def forward():
     """İleri: Kanal A ileri, Kanal B ileri"""
-    # A: IN1=1 IN2=0, B: IN3=1 IN4=0
+    # A: IN1=1 IN2=0, B: IN3=0 IN4=1
     in1.on();  in2.off()
-    in3.on();  in4.off()
+    in3.off();  in4.on()
 
 def backward():
     """Geri: Kanal A geri, Kanal B geri"""
-    # A: IN1=0 IN2=1, B: IN3=0 IN4=1
+    # A: IN1=0 IN2=1, B: IN3=1 IN4=0
     in1.off(); in2.on()
-    in3.off(); in4.on()
+    in3.on();  in4.off()
 
 def turn_left():
     """Sola dön (pivot): sol geri, sağ ileri"""
