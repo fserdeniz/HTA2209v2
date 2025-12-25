@@ -873,14 +873,9 @@ class RobotController:
 
     def _find_best_target(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> Optional[Tuple]:
         """Find the best target in the frame by iterating through allowed colors."""
-        # Yalnızca sarı ve kırmızı takip edilebilir; mavi tamamen devre dışı
-        dominant_hint = [c for c in self.dominant_colors_hint if c in ("yellow", "red")]
-        if dominant_hint:
-            allowed_colors = tuple(dict.fromkeys(dominant_hint))
-        elif self.auto_target_color in ("yellow", "red"):
-            allowed_colors = (self.auto_target_color,)
-        else:
-            allowed_colors = ("yellow", "red")
+        # Yalnızca sari ve kirmizi takip edilebilir; mavi tamamen devre disi
+        allowed_colors = ("red", "yellow")
+        dominant_rank = {color: idx for idx, color in enumerate(self.dominant_colors_hint)}
 
         best_target = None
         best_conf = -1.0
@@ -900,6 +895,10 @@ class RobotController:
             area_norm = area / frame_area
             center_score = max(0.0, 1.0 - abs(cx - center_x) / max(1.0, center_x))
             conf = area_norm * 0.6 + mask_ratio * 0.8 + center_score * 0.4
+            if color in dominant_rank:
+                conf += max(0.0, 0.2 - 0.05 * dominant_rank[color])
+            if self.auto_target_color in allowed_colors and color == self.auto_target_color:
+                conf += 0.1
             if prev_color == color:
                 conf += 0.15
             if prev_cx is not None and prev_cy is not None:
@@ -1146,8 +1145,51 @@ class RobotController:
             if abs(norm_err) < cfg["tracking_deadband"]:
                 norm_err = 0.0
 
+            if self.gripper_burst_until and now < self.gripper_burst_until:
+                self.stop_wheels()
+                return
+            if self.auto_grasped:
+                self.stop_wheels()
+                return
+
+            left_bound = frame_size[0] / 3.0
+            right_bound = 2.0 * frame_size[0] / 3.0
+            centered = left_bound <= cx <= right_bound
+
+            if not centered:
+                turn_cmd = max(
+                    -cfg["tracking_turn_speed_max"],
+                    min(cfg["tracking_turn_speed_max"], -norm_err * cfg["tracking_turn_gain"]),
+                )
+                self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
+                self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
+                return
+
+            dominant_list = list(self.dominant_colors_hint)
+            use_dominant_logic = bool(dominant_list)
+            if use_dominant_logic:
+                dominant_rank = dominant_list.index(color) if color in dominant_list else None
+                if dominant_rank == 1 and not self.auto_grasped:
+                    self.stop_wheels()
+                    try:
+                        self.set_continuous_speed("gripper", 25.0)
+                    except Exception:
+                        pass
+                    self.gripper_burst_until = now + 3.0
+                    self.auto_grasped = True
+                    LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
+                    return
+
+                fwd_cmd = cfg["tracking_forward_speed_max"]
+                if self.auto_forward_invert:
+                    fwd_cmd = -fwd_cmd
+                self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
+                self._set_drive(turn=0.0, forward=self._drive_fwd_smooth)
+                return
+
+            # Fallback: area-based approach if dominant colors are unavailable
             turn_cmd = max(-cfg["tracking_turn_speed_max"], min(cfg["tracking_turn_speed_max"], -norm_err * cfg["tracking_turn_gain"]))
-            
+
             # Forward/backward control based on area
             frame_area = frame_size[0] * frame_size[1]
             normalized_area = area / frame_area
@@ -1175,7 +1217,7 @@ class RobotController:
 
             self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
             self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
-            
+
             self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
             LOGGER.debug(
                 f"Auto TRACKING: Target={color}, Area={area_for_ctrl:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}"
