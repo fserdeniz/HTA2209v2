@@ -185,6 +185,9 @@ class RobotController:
         self._gripper_fired: bool = False
         self._drive_turn_smooth: float = 0.0
         self._drive_fwd_smooth: float = 0.0
+        self._scan_turning_until: float = 0.0
+        self._scan_next_turn_at: float = 0.0
+        self._blue_release_cooldown: float = 0.0
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -489,11 +492,11 @@ class RobotController:
 
         # Autopilot ayarlarını yükle
         self.autopilot_config = {
-            "scan_initial_wait": 3.0,
-            "scan_rotate_duration": 0.5,
-            "scan_hold_duration": 5.0,
-            "scan_steps": 18,
-            "scan_turn_speed": 30.0,
+            "scan_initial_wait": 0.5,
+            "scan_rotate_duration": 0.6,   # ~45° adim
+            "scan_hold_duration": 1.4,     # 2 sn toplam dongu
+            "scan_steps": 9999,            # surekli tarama
+            "scan_turn_speed": 45.0,
             "approach_area_threshold": 0.1,
             "stop_area_threshold": 0.15,
             "backward_area_threshold": 0.2,
@@ -605,6 +608,9 @@ class RobotController:
         self._gripper_fired = False
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
+        self._scan_turning_until = 0.0
+        self._scan_next_turn_at = 0.0
+        self._blue_release_cooldown = 0.0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
         if self.hbridge_ready and GPIO is not None:
@@ -664,13 +670,7 @@ class RobotController:
         # Ortam aydinligina gore (V ortalama / std) min-max belirle
         v_mean = float(np.mean(val))
         v_std = float(np.std(val))
-        val_min = int(max(40, min(255, v_mean - 1.5 * v_std)))  # Asgari aydinlik tabani
-        val_max = int(max(val_min + 10, min(255, v_mean + 1.5 * v_std)))
-        # Doygunluk icin yuzdelik aralik
-        sat_min = int(np.percentile(sat, 20.0))
-        sat_max = int(np.percentile(sat, 98.0))
-        sat_min = max(60, min(255, sat_min))  # minimum satürasyon tabani
-        sat_max = max(sat_min + 10, min(255, sat_max))
+        ss
         for thr in self.color_thresholds.values():
             thr.sat_min = sat_min
             thr.sat_max = sat_max
@@ -700,7 +700,7 @@ class RobotController:
             largest = max(contours, key=cv2.contourArea)
             area = cv2.contourArea(largest)
             # Kucuk hedefler icin limit: en az %0.2 alan veya 300 piksel
-            min_area = max(300.0, mask_img.shape[0] * mask_img.shape[1] * 0.002)
+            min_area = max(120.0, mask_img.shape[0] * mask_img.shape[1] * 0.002)
             if area < min_area:
                 return None
             mask_ratio = float(cv2.countNonZero(mask_img)) / float(mask_img.shape[0] * mask_img.shape[1])
@@ -714,11 +714,11 @@ class RobotController:
             peri = cv2.arcLength(largest, True)
             circularity = 0.0 if peri == 0 else 4.0 * np.pi * (area / (peri * peri))
             # Balon hedefler için: dolgun (solidity), yuvarlak (aspect ~1, circularity yüksek) olmasını bekle
-            if solidity < 0.35:
+            if solidity < 0.20:
                 return None
-            if aspect < 0.55 or aspect > 1.45:
+            if aspect < 0.35 or aspect > 2.8:
                 return None
-            if circularity < 0.45:
+            if circularity < 0.20:
                 return None
             M = cv2.moments(largest)
             if M["m00"] == 0:
@@ -849,6 +849,23 @@ class RobotController:
         self._cy_smooth = 0.0
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
+        self._scan_turning_until = 0.0
+        self._scan_next_turn_at = 0.0
+        self._blue_release_cooldown = 0.0
+
+    def _trigger_blue_release(self, now: float) -> bool:
+        """Open gripper when blue balloon is seen."""
+        if now < self._blue_release_cooldown:
+            return False
+        self.stop_all_motion()
+        try:
+            self.set_continuous_speed("gripper", -30.0)
+        except Exception:
+            pass
+        self.gripper_reverse_until = now + 3.0
+        self._blue_release_cooldown = now + 6.0
+        LOGGER.info("Auto: Blue balloon detected, releasing grip.")
+        return True
 
     def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> None:
         """
@@ -875,12 +892,15 @@ class RobotController:
             LOGGER.debug("Auto: periodic color calibration applied.")
 
         best_target = self._find_best_target(hsv_proc, frame_size)
+        _blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
 
         # --- State Machine ---
         state = self.autopilot_state
 
         if state == AutopilotState.IDLE:
             self.stop_all_motion()
+            if blue_candidate and self._trigger_blue_release(now):
+                return
             if best_target:
                 LOGGER.info("Auto: Target found while idle, switching to TRACKING.")
                 self.autopilot_state = AutopilotState.TRACKING
@@ -893,6 +913,8 @@ class RobotController:
 
         if state == AutopilotState.SCANNING:
             cfg = self.autopilot_config
+            if blue_candidate and self._trigger_blue_release(now):
+                return
             if self.auto_scan_step == 0 and now - self.auto_state_started_at < cfg["scan_initial_wait"]:
                 # Initial wait before starting the scan
                 self.stop_all_motion()
@@ -917,9 +939,9 @@ class RobotController:
                 self.auto_scan_step += 1
                 self.auto_state_started_at = now
                 if self.auto_scan_step >= cfg["scan_steps"]:
-                    LOGGER.warning("Auto: Scan completed, no target found. Switching to SEARCH_FAILED.")
-                    self.autopilot_state = AutopilotState.SEARCH_FAILED
-                    self.stop_all_motion()
+                    # Devamli tarama: adimi sifirla, donusleri surdur
+                    self.auto_scan_step = 0
+                    LOGGER.info("Auto: Scan loop restarting (continuous).")
                 else:
                     LOGGER.info(f"Auto: Scan step {self.auto_scan_step}/{cfg['scan_steps']}.")
             return
@@ -929,6 +951,9 @@ class RobotController:
                 LOGGER.info("Auto: Target lost during tracking. Returning to IDLE.")
                 self.autopilot_state = AutopilotState.IDLE
                 self.stop_all_motion()
+                return
+            if blue_candidate and self._trigger_blue_release(now):
+                self.autopilot_state = AutopilotState.IDLE
                 return
 
             cx, cy, area, depth_norm, mask_ratio, color = best_target
@@ -959,10 +984,9 @@ class RobotController:
                 LOGGER.info("Auto: Target too close, moving backward.")
             elif normalized_area > cfg["stop_area_threshold"]:
                 fwd_cmd = 0.0
-                LOGGER.info("Auto: Target at stop distance, holding position.")
-                # Close enough to switch to the next state
-                self.autopilot_state = AutopilotState.APPROACHING
-                self.stop_wheels()
+                LOGGER.info("Auto: Target at stop distance, holding position (no grasp).")
+                # Gripper yok: yaklaşınca sadece dur, TRACKING'de kal
+                self._set_drive(turn=0.0, forward=0.0)
                 return
             elif normalized_area < cfg["approach_area_threshold"]:
                  fwd_cmd = min(cfg["tracking_forward_speed_max"], max(5.0, (cfg["approach_area_threshold"] - normalized_area) * cfg["tracking_forward_gain"]))
@@ -974,19 +998,11 @@ class RobotController:
             LOGGER.debug(f"Auto TRACKING: Target={color}, Area={normalized_area:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}")
             return
 
-        if state == AutopilotState.APPROACHING:
-            # Simplified: Stop and switch to Grasping. More advanced logic could go here.
-            LOGGER.info("Auto: Approached target. Switching to GRASPING.")
-            self.autopilot_state = AutopilotState.GRASPING
+        if state in (AutopilotState.APPROACHING, AutopilotState.GRASPING):
             self.stop_all_motion()
+            self.autopilot_state = AutopilotState.TRACKING
             return
-            
-        if state == AutopilotState.GRASPING:
-            # Simplified: Just trigger the grasp sequence and then go back to idle.
-            self._execute_grasp()
-            LOGGER.info("Auto: Grasp complete. Returning to IDLE.")
-            self.autopilot_state = AutopilotState.IDLE
-            return
+
 
         if state == AutopilotState.SEARCH_FAILED:
             # Do nothing, wait for a reset

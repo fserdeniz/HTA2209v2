@@ -1,4 +1,4 @@
-"""
+s"""
 Tkinter GUI for HTA2209 with camera preview, manual/auto control, and test runners.
 """
 from __future__ import annotations
