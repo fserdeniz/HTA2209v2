@@ -752,6 +752,70 @@ class RobotController:
     # ------------------------------------------------------------------ #
     # Autopilot (color approach + grasp)
     # ------------------------------------------------------------------ #
+    def _build_color_mask(
+        self,
+        hsv_frame: np.ndarray,
+        color: str,
+    ) -> Tuple[np.ndarray, Optional[Threshold], list[tuple[int, int]]]:
+        thr = self.color_thresholds.get(color)
+        if thr is None:
+            return np.zeros(hsv_frame.shape[:2], dtype=np.uint8), None, []
+        ranges = [(thr.hue_min, thr.hue_max)]
+        # Hue sarmalaması: kullanici min>max verirse veya kirmizi kenarlara gelirse iki bant oluştur
+        if thr.hue_min > thr.hue_max:
+            ranges = [(thr.hue_min, 179), (0, thr.hue_max)]
+        elif color == "red":
+            if thr.hue_min <= 10:
+                ranges.append((170, 179))
+            elif thr.hue_max >= 170:
+                ranges.append((0, 10))
+
+        mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
+        for h_min, h_max in ranges:
+            lower = np.array([h_min, thr.sat_min, thr.val_min], dtype=np.uint8)
+            upper = np.array([h_max, thr.sat_max, thr.val_max], dtype=np.uint8)
+            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_frame, lower, upper))
+        mask = cv2.GaussianBlur(mask, (5, 5), 0)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        return mask, thr, ranges
+
+    def _validate_mask_color(
+        self,
+        hsv_frame: np.ndarray,
+        mask_img: np.ndarray,
+        thr: Threshold,
+        ranges: list[tuple[int, int]],
+        sat_floor: Optional[int] = None,
+        val_floor: Optional[int] = None,
+    ) -> bool:
+        try:
+            masked_pixels = hsv_frame[mask_img > 0]
+            if masked_pixels.size == 0:
+                return False
+            h_med = float(np.median(masked_pixels[:, 0]))
+            s_med = float(np.median(masked_pixels[:, 1]))
+            v_med = float(np.median(masked_pixels[:, 2]))
+            sat_min = max(thr.sat_min, sat_floor) if sat_floor is not None else max(thr.sat_min, 70)
+            val_min = max(thr.val_min, val_floor) if val_floor is not None else max(thr.val_min, 50)
+            hue_diff = None
+            hue_span = None
+            for h_min, h_max in ranges:
+                center = (h_min + h_max) / 2.0
+                span = (h_max - h_min) / 2.0 + 5.0  # hue toleransi
+                diff = min(abs(h_med - center), 180 - abs(h_med - center))
+                if hue_diff is None or diff < hue_diff:
+                    hue_diff = diff
+                    hue_span = span
+            if hue_diff is None or hue_span is None:
+                return False
+            if s_med < sat_min or v_med < val_min or hue_diff > hue_span:
+                return False
+            return True
+        except Exception:
+            return True
+
     def _mask_target(self, hsv_frame: np.ndarray, color: str) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, float, float, str]]]:
         """Return mask and largest contour info for given color."""
 
@@ -793,68 +857,58 @@ class RobotController:
             depth_norm = max(0.0, min(1.0, depth_norm * 1000))
             return mask_img, (cx, cy, int(area), depth_norm, float(mask_ratio), color)
 
-        thr = self.color_thresholds.get(color)
+        mask, thr, ranges = self._build_color_mask(hsv_frame, color)
         if thr is None:
-            return np.zeros(hsv_frame.shape[:2], dtype=np.uint8), None
-        ranges = [(thr.hue_min, thr.hue_max)]
-        # Hue sarmalaması: kullanici min>max verirse veya kirmizi kenarlara gelirse iki bant oluştur
-        if thr.hue_min > thr.hue_max:
-            ranges = [(thr.hue_min, 179), (0, thr.hue_max)]
-        elif color == "red":
-            if thr.hue_min <= 10:
-                ranges.append((170, 179))
-            elif thr.hue_max >= 170:
-                ranges.append((0, 10))
-
-        mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
-        for h_min, h_max in ranges:
-            lower = np.array([h_min, thr.sat_min, thr.val_min], dtype=np.uint8)
-            upper = np.array([h_max, thr.sat_max, thr.val_max], dtype=np.uint8)
-            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_frame, lower, upper))
-        mask = cv2.GaussianBlur(mask, (5, 5), 0)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+            return mask, None
 
         result = find_contour(mask)
         if result:
             mask_img, target = result
             # Ek renk dogrulama: median hue/sat/val kontrolü, yalanci pozitifleri eleyelim
-            try:
-                masked_pixels = hsv_frame[mask_img > 0]
-                if masked_pixels.size == 0:
-                    return mask, None
-                h_med = float(np.median(masked_pixels[:, 0]))
-                s_med = float(np.median(masked_pixels[:, 1]))
-                v_med = float(np.median(masked_pixels[:, 2]))
-                sat_floor = max(thr.sat_min, 70)
-                val_floor = max(thr.val_min, 50)
-                hue_diff = None
-                hue_span = None
-                for h_min, h_max in ranges:
-                    center = (h_min + h_max) / 2.0
-                    span = (h_max - h_min) / 2.0 + 5.0  # hue toleransi
-                    diff = min(abs(h_med - center), 180 - abs(h_med - center))
-                    if hue_diff is None or diff < hue_diff:
-                        hue_diff = diff
-                        hue_span = span
-                if hue_diff is None or hue_span is None:
-                    return mask, None
-                if s_med < sat_floor or v_med < val_floor or hue_diff > hue_span:
-                    LOGGER.debug(
-                        "Maske reddedildi: hue_med=%.1f sat_med=%.1f val_med=%.1f (sat>=%.0f, val>=%.0f, hue_diff<=%.1f)",
-                        h_med,
-                        s_med,
-                        v_med,
-                        sat_floor,
-                        val_floor,
-                        hue_span,
-                    )
-                    return mask, None
-                return mask_img, target
-            except Exception:
-                return mask_img, target
+            if not self._validate_mask_color(hsv_frame, mask_img, thr, ranges):
+                return mask, None
+            return mask_img, target
         return mask, None
+
+    def _dense_target(
+        self, hsv_frame: np.ndarray, color: str
+    ) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, float, float, str]], float]:
+        mask, thr, ranges = self._build_color_mask(hsv_frame, color)
+        if thr is None:
+            return mask, None, 0.0
+        frame_area = float(mask.shape[0] * mask.shape[1])
+        min_area = max(120.0, frame_area * 0.002)
+        if cv2.countNonZero(mask) < min_area:
+            return mask, None, 0.0
+        if not self._validate_mask_color(hsv_frame, mask, thr, ranges, sat_floor=80, val_floor=60):
+            return mask, None, 0.0
+
+        sat = hsv_frame[:, :, 1].astype(np.float32) / 255.0
+        val = hsv_frame[:, :, 2].astype(np.float32) / 255.0
+        weight = (mask.astype(np.float32) / 255.0) * (0.6 * sat + 0.4 * val)
+        min_dim = min(mask.shape[:2])
+        kernel = max(11, int(min_dim * 0.05))
+        if kernel % 2 == 0:
+            kernel += 1
+        density = cv2.blur(weight, (kernel, kernel))
+        _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(density)
+        if max_val < 0.03:
+            return mask, None, 0.0
+
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        label = labels[max_loc[1], max_loc[0]]
+        if label == 0 or label >= num_labels:
+            return mask, None, 0.0
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            return mask, None, 0.0
+        cx = int(centroids[label][0])
+        cy = int(centroids[label][1])
+        mask_ratio = area / frame_area
+        depth_norm = 1.0 / max(1.0, min(area, frame_area))
+        depth_norm = max(0.0, min(1.0, depth_norm * 1000))
+        score = float(max_val) + min(0.3, mask_ratio * 3.0)
+        return mask, (cx, cy, area, depth_norm, float(mask_ratio), color), score
 
     def _aim_arm(self, target: Tuple[int, int, int, float, float, str], frame_size: Tuple[int, int]) -> None:
         """
@@ -873,14 +927,10 @@ class RobotController:
 
     def _find_best_target(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> Optional[Tuple]:
         """Find the best target in the frame by iterating through allowed colors."""
-        # Yalnızca sari ve kirmizi takip edilebilir; mavi tamamen devre disi
+        # Yalnızca sari ve kirmizi takip edilebilir; hedef en yoğun bolgeye gore secilir.
         allowed_colors = ("red", "yellow")
-        dominant_rank = {color: idx for idx, color in enumerate(self.dominant_colors_hint)}
-
         best_target = None
-        best_conf = -1.0
-        frame_area = max(1, int(frame_size[0] * frame_size[1]))
-        center_x = frame_size[0] // 2
+        best_score = -1.0
         prev_target = self.last_target
         prev_color = self.last_target_color if self.last_target_color in allowed_colors else None
         prev_cx = prev_target[0] if prev_target else None
@@ -888,30 +938,19 @@ class RobotController:
         max_dist = max(1.0, min(frame_size) * 0.25)
 
         for color in allowed_colors:
-            _mask, candidate = self._mask_target(hsv_frame, color)
+            _mask, candidate, score = self._dense_target(hsv_frame, color)
             if candidate is None:
                 continue
-            cx, cy, area, depth_norm, mask_ratio, _col = candidate
-            area_norm = area / frame_area
-            center_score = max(0.0, 1.0 - abs(cx - center_x) / max(1.0, center_x))
-            conf = area_norm * 0.6 + mask_ratio * 0.8 + center_score * 0.4
-            if color in dominant_rank:
-                conf += max(0.0, 0.2 - 0.05 * dominant_rank[color])
-            if self.auto_target_color in allowed_colors and color == self.auto_target_color:
-                conf += 0.1
-            if prev_color == color:
-                conf += 0.15
-            if prev_cx is not None and prev_cy is not None:
+            if prev_color == color and prev_cx is not None and prev_cy is not None:
+                cx, cy = candidate[0], candidate[1]
                 dist = float(np.hypot(cx - prev_cx, cy - prev_cy))
                 if dist <= max_dist:
-                    conf += 0.15 * (1.0 - dist / max_dist)
-            if conf > best_conf:
-                best_conf = conf
+                    score += 0.1 * (1.0 - dist / max_dist)
+            if score > best_score:
+                best_score = score
                 best_target = candidate
-        
-        if best_target:
-            return best_target
-        return None
+
+        return best_target
 
     def _reset_autopilot(self) -> None:
         self.autopilot_state = AutopilotState.IDLE
