@@ -910,6 +910,29 @@ class RobotController:
         score = float(max_val) + min(0.3, mask_ratio * 3.0)
         return mask, (cx, cy, area, depth_norm, float(mask_ratio), color), score
 
+    def _dominant_zone(self, hsv_frame: np.ndarray, color: str) -> Tuple[Optional[int], int]:
+        mask, thr, ranges = self._build_color_mask(hsv_frame, color)
+        if thr is None:
+            return None, 0
+        if not self._validate_mask_color(hsv_frame, mask, thr, ranges, sat_floor=80, val_floor=60):
+            return None, 0
+        height, width = mask.shape[:2]
+        frame_area = height * width
+        min_area = max(120.0, frame_area * 0.002)
+        x1 = width // 3
+        x2 = (2 * width) // 3
+        left = cv2.countNonZero(mask[:, :x1])
+        mid = cv2.countNonZero(mask[:, x1:x2])
+        right = cv2.countNonZero(mask[:, x2:])
+        total = left + mid + right
+        if total < min_area:
+            return None, total
+        if mid >= left and mid >= right:
+            return 1, total
+        if left >= right:
+            return 0, total
+        return 2, total
+
     def _aim_arm(self, target: Tuple[int, int, int, float, float, str], frame_size: Tuple[int, int]) -> None:
         """
         Move single positional joint toward target (horizontal pan); continuous gripper is not auto-driven here.
@@ -1199,72 +1222,45 @@ class RobotController:
                 self.stop_wheels()
                 return
 
-            turn_cmd = max(
-                -cfg["tracking_turn_speed_max"],
-                min(cfg["tracking_turn_speed_max"], norm_err * cfg["tracking_turn_gain"]),
-            )
+            zone, _zone_total = self._dominant_zone(hsv_proc, color)
+            if zone is None:
+                self.stop_wheels()
+                return
+
+            zone_turn = -1.0 if zone == 0 else 1.0 if zone == 2 else 0.0
+            turn_cmd = zone_turn * cfg["tracking_turn_speed_max"]
             self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
 
-            left_bound = frame_size[0] / 3.0
-            right_bound = 2.0 * frame_size[0] / 3.0
-            center_pos = cx
-            centered = left_bound <= center_pos <= right_bound
-
-            if not centered:
+            if zone != 1:
                 self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
                 return
 
             dominant_list = list(self.dominant_colors_hint)
-            use_dominant_logic = bool(dominant_list)
-            if use_dominant_logic:
-                dominant_rank = dominant_list.index(color) if color in dominant_list else None
-                if dominant_rank == 1 and not self.auto_grasped:
-                    self.stop_wheels()
-                    try:
-                        self.set_continuous_speed("gripper", 25.0)
-                    except Exception:
-                        pass
-                    self.gripper_burst_until = now + 3.0
-                    self.auto_grasped = True
-                    LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
-                    return
-
-                base_speed = cfg["tracking_forward_speed_max"]
-                center_factor = max(0.4, 1.0 - abs(norm_err))
-                distance_factor = 1.0
-                if area_for_ctrl > cfg["approach_area_threshold"]:
-                    span = max(1e-3, cfg["stop_area_threshold"] - cfg["approach_area_threshold"])
-                    if area_for_ctrl >= cfg["stop_area_threshold"]:
-                        distance_factor = 0.4
-                    else:
-                        distance_factor = 1.0 - 0.6 * (area_for_ctrl - cfg["approach_area_threshold"]) / span
-                fwd_cmd = max(4.0, base_speed * center_factor * distance_factor)
-                if self.auto_forward_invert:
-                    fwd_cmd = -fwd_cmd
-                self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
-                self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
+            dominant_rank = dominant_list.index(color) if color in dominant_list else None
+            if dominant_rank == 1 and not self.auto_grasped:
+                self.stop_wheels()
+                try:
+                    self.set_continuous_speed("gripper", 25.0)
+                except Exception:
+                    pass
+                self.gripper_burst_until = now + 3.0
+                self.auto_grasped = True
+                LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
                 return
 
-            # Fallback: area-based approach if dominant colors are unavailable
-            # Forward/backward control based on area
-            fwd_cmd = 0.0
-            if area_for_ctrl > cfg["backward_area_threshold"]:
-                fwd_cmd = cfg["backward_speed"]
-                LOGGER.info("Auto: Target too close, moving backward.")
-            elif area_for_ctrl > cfg["stop_area_threshold"]:
-                fwd_cmd = 0.0
-                LOGGER.info("Auto: Target at stop distance, holding position (no grasp).")
-                # Gripper yok: yaklaşınca sadece dur, TRACKING'de kal
+            if area_for_ctrl >= cfg["stop_area_threshold"]:
                 self._set_drive(turn=0.0, forward=0.0)
                 return
-            elif area_for_ctrl < cfg["approach_area_threshold"]:
-                fwd_cmd = min(cfg["tracking_forward_speed_max"], max(5.0, (cfg["approach_area_threshold"] - area_for_ctrl) * cfg["tracking_forward_gain"]))
 
+            base_speed = cfg["tracking_forward_speed_max"]
+            distance_factor = 1.0
+            if area_for_ctrl > cfg["approach_area_threshold"]:
+                span = max(1e-3, cfg["stop_area_threshold"] - cfg["approach_area_threshold"])
+                distance_factor = 1.0 - 0.6 * (area_for_ctrl - cfg["approach_area_threshold"]) / span
+            fwd_cmd = max(4.0, base_speed * distance_factor)
             if self.auto_forward_invert:
                 fwd_cmd = -fwd_cmd
-
             self._drive_fwd_smooth = 0.8 * self._drive_fwd_smooth + 0.2 * fwd_cmd
-
             self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
             LOGGER.debug(
                 f"Auto TRACKING: Target={color}, Area={area_for_ctrl:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}"
