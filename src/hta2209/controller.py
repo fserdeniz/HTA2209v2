@@ -137,6 +137,17 @@ class RobotController:
         self.l298n_swap_sides: bool = False
         self.drive_invert: bool = False
         self.camera_swap_rb: bool = False
+        self.camera_source: str = "picamera2"
+        self.camera_index: int = 0
+        self.camera_frame_width: int = 640
+        self.camera_frame_height: int = 640
+        self.camera_controls: Dict[str, int] = {
+            "brightness": 10,
+            "contrast": 0,
+            "saturation": 60,
+            "hue": 0,
+            "gain": 122,
+        }
 
         self.wheel_state: Dict[str, float] = {wheel: 0.0 for wheel in WHEEL_CHANNELS}
         self.wheel_polarity: Dict[str, int] = {wheel: 1 for wheel in WHEEL_CHANNELS}
@@ -433,6 +444,13 @@ class RobotController:
             "l298n_swap_sides": self.l298n_swap_sides,
             "drive_invert": self.drive_invert,
             "camera_swap_rb": self.camera_swap_rb,
+            "camera": {
+                "source": self.camera_source,
+                "index": self.camera_index,
+                "frame_width": self.camera_frame_width,
+                "frame_height": self.camera_frame_height,
+                "controls": dict(self.camera_controls),
+            },
             "autopilot": dict(self.autopilot_config),
             "thresholds": {color: thr.as_dict() for color, thr in self.color_thresholds.items()},
         }
@@ -482,6 +500,34 @@ class RobotController:
             self.drive_invert = bool(raw.get("drive_invert"))
         if "camera_swap_rb" in raw:
             self.camera_swap_rb = bool(raw.get("camera_swap_rb"))
+        camera_conf = raw.get("camera", {})
+        if isinstance(camera_conf, dict):
+            source = camera_conf.get("source")
+            if isinstance(source, str) and source.lower() in ("picamera2", "opencv"):
+                self.camera_source = source.lower()
+            if "index" in camera_conf:
+                try:
+                    self.camera_index = int(camera_conf.get("index"))
+                except (TypeError, ValueError):
+                    pass
+            if "frame_width" in camera_conf:
+                try:
+                    self.camera_frame_width = int(camera_conf.get("frame_width"))
+                except (TypeError, ValueError):
+                    pass
+            if "frame_height" in camera_conf:
+                try:
+                    self.camera_frame_height = int(camera_conf.get("frame_height"))
+                except (TypeError, ValueError):
+                    pass
+            controls = camera_conf.get("controls", {})
+            if isinstance(controls, dict):
+                for key in self.camera_controls:
+                    if key in controls:
+                        try:
+                            self.camera_controls[key] = int(controls[key])
+                        except (TypeError, ValueError):
+                            pass
         # Opsiyonel servo kanal konfigurasyonu
         servo_ch = raw.get("servo_channels", {})
         for joint, ch in servo_ch.items():
@@ -747,6 +793,11 @@ class RobotController:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
         return mask, thr, ranges
+
+    def build_color_mask(self, hsv_frame: np.ndarray, color: str) -> np.ndarray:
+        """Expose color mask for GUI preview without touching autopilot state."""
+        mask, _thr, _ranges = self._build_color_mask(hsv_frame, color)
+        return mask
 
     def _validate_mask_color(
         self,

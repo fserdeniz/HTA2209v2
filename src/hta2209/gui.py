@@ -38,6 +38,14 @@ THRESHOLD_FIELDS = (
     ("val_max", 0, 255),
 )
 
+CAMERA_CONTROL_FIELDS = (
+    ("brightness", 0, 255),
+    ("contrast", 0, 255),
+    ("saturation", 0, 255),
+    ("hue", 0, 255),
+    ("gain", 0, 255),
+)
+
 MANUAL_DRIVE_INCREMENT = 10
 MANUAL_TURN_INCREMENT = 10
 JOINT_INCREMENT = 5
@@ -80,9 +88,11 @@ class HTAControlGUI:
         self._picam_color_order = "rgb"
         self._ensure_picamera2()
 
-        # Bu sistemde yalnızca CSI portundaki Picamera2 kullanılacak
+        # Varsayilan kaynak Picamera2; istenirse OpenCV (USB) ile de calisir.
         self._camera_failures = 0
         self.camera_status_var = tk.StringVar(value="Kamera kapali")
+        self.camera_source_var = tk.StringVar(value=self.controller.camera_source)
+        self.camera_index_var = tk.IntVar(value=self.controller.camera_index)
         self.target_color_var = tk.StringVar(value="red")
         self.camera_label: ttk.Label | None = None
         self.camera_running = False
@@ -90,11 +100,18 @@ class HTAControlGUI:
         self._camera_photo = None
         self._last_frame = None
         self._auto_frame_counter = 0
+        self.cv2_cap = None
+        self._mask_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         self.ai_detection_var = tk.BooleanVar(value=False)
         self.ai_colors_var = tk.StringVar(value="")
+        self.mask_preview_var = tk.BooleanVar(value=False)
+        self.mask_preview_color_var = tk.StringVar(value=self.controller.auto_target_color)
+        self.mask_preview_only_var = tk.BooleanVar(value=False)
+        self.mask_preview_dilate_var = tk.BooleanVar(value=False)
         self.metric_labels: Dict[str, tk.StringVar] = {}
 
         self.threshold_vars: Dict[str, Dict[str, tk.IntVar]] = {}
+        self.camera_control_vars: Dict[str, tk.IntVar] = {}
         self.wheel_scales: Dict[str, ttk.Scale] = {}
         self.wheel_value_labels: Dict[str, tk.StringVar] = {}
         self.joint_scales: Dict[str, ttk.Scale] = {}
@@ -256,6 +273,35 @@ class HTAControlGUI:
         )
         self.ai_checkbox.pack(anchor="w", pady=(0, 5))
         ttk.Label(ai_box, textvariable=self.ai_colors_var, wraplength=700, justify=tk.LEFT).pack(anchor="w")
+
+        mask_box = ttk.LabelFrame(frame, text="Maske Onizleme", padding=10)
+        mask_box.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
+        ttk.Checkbutton(
+            mask_box,
+            text="Canli maske + kontur goster",
+            variable=self.mask_preview_var,
+        ).pack(anchor="w", pady=(0, 4))
+        color_row = ttk.Frame(mask_box)
+        color_row.pack(anchor="w", pady=(0, 4))
+        ttk.Label(color_row, text="Renk:").pack(side=tk.LEFT)
+        color_combo = ttk.Combobox(
+            color_row,
+            values=list(self.controller.colors()),
+            textvariable=self.mask_preview_color_var,
+            state="readonly",
+            width=10,
+        )
+        color_combo.pack(side=tk.LEFT, padx=5)
+        ttk.Checkbutton(
+            mask_box,
+            text="Sadece maske goruntusu (siyah-beyaz)",
+            variable=self.mask_preview_only_var,
+        ).pack(anchor="w", pady=(0, 4))
+        ttk.Checkbutton(
+            mask_box,
+            text="Maske genislet (dilate) uygula",
+            variable=self.mask_preview_dilate_var,
+        ).pack(anchor="w")
         return frame
 
     def _make_threshold_callback(self, color: str, field_name: str, var: tk.IntVar):
@@ -274,6 +320,59 @@ class HTAControlGUI:
 
     def _on_threshold_change(self, color: str, field_name: str, value: int) -> None:
         self.controller.set_color_threshold(color, field_name, value)
+
+    def _make_camera_control_callback(self, field_name: str, var: tk.IntVar):
+        def callback() -> None:
+            self._on_camera_control_change(field_name, var.get())
+
+        return callback
+
+    def _make_camera_control_trace(self, field_name: str, var: tk.IntVar):
+        def trace(*_args) -> None:
+            if self._updating:
+                return
+            self._on_camera_control_change(field_name, var.get())
+
+        return trace
+
+    def _on_camera_control_change(self, field_name: str, value: int) -> None:
+        if field_name in self.controller.camera_controls:
+            self.controller.camera_controls[field_name] = int(value)
+        if self.camera_running:
+            self._apply_camera_controls()
+
+    def _on_camera_source_change(self) -> None:
+        self.controller.camera_source = self.camera_source_var.get()
+        self._update_camera_source_ui()
+        if self.camera_running:
+            self._stop_stream()
+            self._start_stream()
+
+    def _make_camera_index_trace(self):
+        def trace(*_args) -> None:
+            if self._updating:
+                return
+            self._on_camera_index_change()
+
+        return trace
+
+    def _on_camera_index_change(self, *_args) -> None:
+        if self._updating:
+            return
+        try:
+            self.controller.camera_index = int(self.camera_index_var.get())
+        except (TypeError, ValueError):
+            return
+        if self.camera_running and self.camera_source_var.get() == "opencv":
+            self._stop_stream()
+            self._start_stream()
+
+    def _update_camera_source_ui(self) -> None:
+        use_opencv = self.camera_source_var.get() == "opencv"
+        try:
+            self.camera_index_spin.configure(state="normal" if use_opencv else "disabled")
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     def _drive_tab(self, parent: ttk.Notebook) -> ttk.Frame:
@@ -484,38 +583,123 @@ class HTAControlGUI:
         if self.picam_supported:
             self.camera_status_var.set("Picamera2 hazir")
         else:
-            self.camera_status_var.set("Picamera2 bulunamadi")
+            self.camera_status_var.set("Picamera2 bulunamadi (OpenCV kullanilabilir)")
+
+    def _apply_camera_controls(self) -> None:
+        controls = self.controller.camera_controls
+        source = self.camera_source_var.get()
+        if source == "opencv" and self.cv2_cap is not None:
+            self.cv2_cap.set(cv2.CAP_PROP_BRIGHTNESS, controls.get("brightness", 0))
+            self.cv2_cap.set(cv2.CAP_PROP_CONTRAST, controls.get("contrast", 0))
+            self.cv2_cap.set(cv2.CAP_PROP_SATURATION, controls.get("saturation", 0))
+            self.cv2_cap.set(cv2.CAP_PROP_HUE, controls.get("hue", 0))
+            self.cv2_cap.set(cv2.CAP_PROP_GAIN, controls.get("gain", 0))
+            return
+        if source == "picamera2" and self.picam is not None:
+            control_map = {
+                "brightness": "Brightness",
+                "contrast": "Contrast",
+                "saturation": "Saturation",
+                "gain": "AnalogueGain",
+                "hue": "Hue",
+            }
+            payload = {}
+            try:
+                available = getattr(self.picam, "camera_controls", {}) or {}
+            except Exception:
+                available = {}
+            for key, name in control_map.items():
+                if key not in controls:
+                    continue
+                if available and name not in available:
+                    continue
+                value = controls.get(key)
+                if value is None:
+                    continue
+                ctrl_info = available.get(name) if isinstance(available, dict) else None
+                if ctrl_info is not None:
+                    try:
+                        min_val = float(ctrl_info.min)
+                        max_val = float(ctrl_info.max)
+                        value = float(value)
+                        if value < min_val or value > max_val:
+                            value = min_val + (max_val - min_val) * (value / 255.0)
+                    except Exception:
+                        pass
+                payload[name] = value
+            if payload:
+                try:
+                    self.picam.set_controls(payload)
+                except Exception as exc:
+                    self._append_log(f"Kamera ayarlari uygulanamadi: {exc}")
 
     def _start_stream(self) -> None:
         self._stop_stream()
         self._auto_frame_counter = 0
+        source = self.camera_source_var.get()
+        self.controller.camera_source = source
+        self._on_camera_index_change()
 
-        # Yalnızca Picamera2 kullanılacak
+        if source == "opencv":
+            try:
+                self.cv2_cap = cv2.VideoCapture(self.controller.camera_index)
+                if not self.cv2_cap.isOpened():
+                    raise RuntimeError("OpenCV kamera acilamadi")
+                self.cv2_cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.controller.camera_frame_width)
+                self.cv2_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.controller.camera_frame_height)
+                self._apply_camera_controls()
+                self.camera_running = True
+                self._camera_failures = 0
+                self.camera_status_var.set(f"Kamera acik (OpenCV index {self.controller.camera_index})")
+                self._update_camera_frame()
+                return
+            except Exception as exc:
+                self.camera_status_var.set(f"OpenCV kamera acilamadi: {exc}")
+                messagebox.showerror("Kamera", f"OpenCV kamera acilamadi: {exc}")
+                return
+
         if not self.picam_supported:
-            self.camera_status_var.set("Picamera2 bulunamadı; yalnızca CSI destekleniyor.")
-            messagebox.showerror("Kamera", "Picamera2 modulu bulunamadı veya yüklenemedi.")
+            self.camera_status_var.set("Picamera2 bulunamadi; OpenCV kullanabilirsiniz.")
+            messagebox.showerror("Kamera", "Picamera2 modulu bulunamadi veya yuklenemedi.")
             return
         try:
             if self.picam is None:
                 self.picam = Picamera2()
+            preferred_size = (
+                int(self.controller.camera_frame_width),
+                int(self.controller.camera_frame_height),
+            )
+            fallback_size = (1280, 720)
+            actual_size = preferred_size
             self._picam_color_order = "rgb"
             try:
-                config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "RGB888"})
+                config = self.picam.create_video_configuration(main={"size": preferred_size, "format": "RGB888"})
                 self.picam.configure(config)
             except Exception:
-                config = self.picam.create_video_configuration(main={"size": (1280, 720), "format": "BGR888"})
-                self.picam.configure(config)
-                self._picam_color_order = "bgr"
+                try:
+                    config = self.picam.create_video_configuration(main={"size": preferred_size, "format": "BGR888"})
+                    self.picam.configure(config)
+                    self._picam_color_order = "bgr"
+                except Exception:
+                    actual_size = fallback_size
+                    try:
+                        config = self.picam.create_video_configuration(main={"size": fallback_size, "format": "RGB888"})
+                        self.picam.configure(config)
+                    except Exception:
+                        config = self.picam.create_video_configuration(main={"size": fallback_size, "format": "BGR888"})
+                        self.picam.configure(config)
+                        self._picam_color_order = "bgr"
             self._sync_picam_color_order()
             self.picam.start()
+            self._apply_camera_controls()
             self.camera_running = True
             self._camera_failures = 0
-            self.camera_status_var.set("Kamera açık (Picamera2 1280x720)")
-            self._update_picam_frame()
+            self.camera_status_var.set(f"Kamera acik (Picamera2 {actual_size[0]}x{actual_size[1]})")
+            self._update_camera_frame()
             return
         except Exception as exc:
-            self.camera_status_var.set(f"Picamera2 açılamadı: {exc}")
-            messagebox.showerror("Kamera", f"Picamera2 açılamadı: {exc}")
+            self.camera_status_var.set(f"Picamera2 acilamadi: {exc}")
+            messagebox.showerror("Kamera", f"Picamera2 acilamadi: {exc}")
 
     def _stop_stream(self) -> None:
         self.camera_running = False
@@ -527,6 +711,12 @@ class HTAControlGUI:
                 self.picam.stop()
             except Exception:
                 pass
+        if self.cv2_cap is not None:
+            try:
+                self.cv2_cap.release()
+            except Exception:
+                pass
+            self.cv2_cap = None
         self.camera_status_var.set("Kaynak kapali")
         if self.camera_label is not None:
             self.camera_label.configure(image="", text="Onizleme yok")
@@ -547,35 +737,78 @@ class HTAControlGUI:
         cv2.line(frame, (x2, 0), (x2, height - 1), guide_color, 1)
         return frame
 
-    def _update_picam_frame(self) -> None:
-        if not self.camera_running or self.picam is None:
+    def _apply_mask_preview(self, frame):
+        if self._last_frame is None or frame is None or frame.size == 0:
+            return frame
+        color = self.mask_preview_color_var.get()
+        if color not in self.controller.color_thresholds:
+            return frame
+        hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
+        mask = self.controller.build_color_mask(hsv, color)
+        if self.mask_preview_dilate_var.get():
+            mask = cv2.dilate(mask, self._mask_kernel, iterations=1)
+
+        if self.mask_preview_only_var.get():
+            preview = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
+        else:
+            preview = frame.copy()
+            overlay = preview.copy()
+            overlay[mask > 0] = (0, 255, 0)
+            preview = cv2.addWeighted(preview, 0.7, overlay, 0.3, 0)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest)
+            min_area = max(500.0, mask.shape[0] * mask.shape[1] * 0.001)
+            if area >= min_area:
+                x, y, w, h = cv2.boundingRect(largest)
+                cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cx = int(x + w / 2)
+                cy = int(y + h / 2)
+                cv2.circle(preview, (cx, cy), 5, (255, 0, 0), -1)
+        return preview
+
+    def _update_camera_frame(self) -> None:
+        if not self.camera_running:
             return
+        source = self.camera_source_var.get()
+        source_label = "OpenCV" if source == "opencv" else "Picamera2"
         try:
-            frame = self.picam.capture_array()
-            if frame is None:
-                raise RuntimeError("Picamera2 frame is None")
-            # Kamera ters takili, 180 derece cevir
-            frame = cv2.rotate(frame, cv2.ROTATE_180)
-            if frame.ndim == 3 and frame.shape[2] == 4:
-                if self._picam_color_order == "rgb":
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
-                else:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
-            elif self._picam_color_order == "bgr":
+            if source == "opencv":
+                if self.cv2_cap is None:
+                    raise RuntimeError("OpenCV kamera hazir degil")
+                ok, frame = self.cv2_cap.read()
+                if not ok or frame is None:
+                    raise RuntimeError("OpenCV frame is None")
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            if self.controller.camera_swap_rb:
-                frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            else:
+                if self.picam is None:
+                    return
+                frame = self.picam.capture_array()
+                if frame is None:
+                    raise RuntimeError("Picamera2 frame is None")
+                # Kamera ters takili, 180 derece cevir
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
+                if frame.ndim == 3 and frame.shape[2] == 4:
+                    if self._picam_color_order == "rgb":
+                        frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
+                    else:
+                        frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+                elif self._picam_color_order == "bgr":
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                if self.controller.camera_swap_rb:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         except Exception as exc:
             self._camera_failures += 1
             if self._camera_failures >= 5:
-                self.camera_status_var.set(f"Picamera2 kare okunamadi ({exc}), durduruluyor.")
+                self.camera_status_var.set(f"{source_label} kare okunamadi ({exc}), durduruluyor.")
                 self._stop_stream()
                 return
-            self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_picam_frame)
+            self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_camera_frame)
             return
 
         self._camera_failures = 0
-        # Normalize Picamera2 output to RGB for the OpenCV pipeline.
         self._last_frame = frame
         display_frame = self._last_frame
 
@@ -593,6 +826,9 @@ class HTAControlGUI:
 
         dominant_list = [c[0] for c in colors] if colors else None
         self.controller.set_dominant_colors_hint(dominant_list)
+
+        if self.mask_preview_var.get():
+            display_frame = self._apply_mask_preview(display_frame)
 
         if not self.controller.is_manual():
             hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
@@ -645,7 +881,7 @@ class HTAControlGUI:
             self.controller.auto_calibrate_from_frame(hsv)
             self._refresh_threshold_fields()
 
-        self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_picam_frame)
+        self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_camera_frame)
 
     # ------------------------------------------------------------------ #
     # Test helpers
@@ -794,12 +1030,40 @@ class HTAControlGUI:
         ttk.Button(settings, text="Kaydet", command=self._save_state).pack(fill=tk.X, pady=2)
         ttk.Button(settings, text="Yeniden Yukle", command=self._reload_state).pack(fill=tk.X, pady=2)
 
-        cam_box = ttk.LabelFrame(sidebar, text="Kamera Kontrolu (Picamera2 - CSI)", padding=10)
+        cam_box = ttk.LabelFrame(sidebar, text="Kamera Kontrolu", padding=10)
         cam_box.pack(fill=tk.X, pady=(0, 10))
         row = 0
-        ttk.Label(cam_box, text="Kaynak: Raspberry Pi Camera Module v3 (Picamera2)").grid(
-            row=row, column=0, columnspan=4, sticky="w"
+        source_frame = ttk.Frame(cam_box)
+        source_frame.grid(row=row, column=0, columnspan=4, sticky="w")
+        ttk.Label(source_frame, text="Kaynak:").pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            source_frame,
+            text="Picamera2 (CSI)",
+            value="picamera2",
+            variable=self.camera_source_var,
+            command=self._on_camera_source_change,
+        ).pack(side=tk.LEFT, padx=4)
+        ttk.Radiobutton(
+            source_frame,
+            text="OpenCV (USB)",
+            value="opencv",
+            variable=self.camera_source_var,
+            command=self._on_camera_source_change,
+        ).pack(side=tk.LEFT, padx=4)
+        row += 1
+        index_frame = ttk.Frame(cam_box)
+        index_frame.grid(row=row, column=0, columnspan=4, sticky="w", pady=(2, 4))
+        ttk.Label(index_frame, text="OpenCV indeks:").pack(side=tk.LEFT)
+        self.camera_index_spin = tk.Spinbox(
+            index_frame,
+            from_=0,
+            to=10,
+            textvariable=self.camera_index_var,
+            width=5,
+            command=self._on_camera_index_change,
         )
+        self.camera_index_spin.pack(side=tk.LEFT, padx=4)
+        self.camera_index_var.trace_add("write", self._make_camera_index_trace())
         row += 1
 
         ttk.Button(cam_box, text="Baslat", command=self._start_stream).grid(row=row, column=0, columnspan=2, padx=5, pady=2, sticky="ew")
@@ -807,6 +1071,25 @@ class HTAControlGUI:
         row += 1
 
         ttk.Label(cam_box, textvariable=self.camera_status_var).grid(row=row, column=0, columnspan=4, sticky="w")
+        row += 1
+
+        controls_box = ttk.LabelFrame(cam_box, text="Goruntu Ayarlari", padding=6)
+        controls_box.grid(row=row, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        for idx, (field_name, min_val, max_val) in enumerate(CAMERA_CONTROL_FIELDS):
+            ttk.Label(controls_box, text=field_name.replace("_", " ").title()).grid(row=idx, column=0, sticky="w")
+            var = tk.IntVar(value=self.controller.camera_controls.get(field_name, 0))
+            spin = tk.Spinbox(
+                controls_box,
+                from_=min_val,
+                to=max_val,
+                textvariable=var,
+                width=6,
+                command=self._make_camera_control_callback(field_name, var),
+            )
+            spin.grid(row=idx, column=1, padx=5, pady=2, sticky="e")
+            var.trace_add("write", self._make_camera_control_trace(field_name, var))
+            self.camera_control_vars[field_name] = var
+        self._update_camera_source_ui()
 
         ttk.Label(
             sidebar,
@@ -1012,6 +1295,11 @@ class HTAControlGUI:
         self.run_state_var.set(f"Durum: {self.controller.run_state}")
         self.auto_threshold_var.set(self.controller.auto_threshold_enabled)
         self.target_color_var.set(self.controller.auto_target_color)
+        self.camera_source_var.set(self.controller.camera_source)
+        self.camera_index_var.set(self.controller.camera_index)
+        for name, var in self.camera_control_vars.items():
+            var.set(self.controller.camera_controls.get(name, var.get()))
+        self._update_camera_source_ui()
 
         self._refresh_threshold_fields()
 
