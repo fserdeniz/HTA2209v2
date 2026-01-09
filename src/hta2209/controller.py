@@ -160,6 +160,7 @@ class RobotController:
         self._turn_until: float = 0.0
         self._turn_direction: int = 0
         self._detect_hold_until: float = 0.0
+        self._last_target_seen_at: float = 0.0
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -519,6 +520,7 @@ class RobotController:
             "align_center_tol_ratio": 0.08,
             "align_hold_sec": 0.3,
             "detect_hold_sec": 0.2,
+            "lost_hold_sec": 1.5,
             "turn_kp": 1.0,
             "turn_kd": 0.3,
             "turn_smooth_alpha": 0.6,
@@ -626,6 +628,7 @@ class RobotController:
         self._turn_until = 0.0
         self._turn_direction = 0
         self._detect_hold_until = 0.0
+        self._last_target_seen_at = 0.0
         self._tracking_zone = 0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
@@ -701,7 +704,10 @@ class RobotController:
             return
 
         now = time.monotonic()
+        raw_target = target
         best_target = target
+        if raw_target is not None:
+            self._last_target_seen_at = now
         if best_target:
             cx, cy, area, depth_norm, mask_ratio, color = best_target
             self._target_raw_pos = (cx, cy)
@@ -785,7 +791,11 @@ class RobotController:
             return
 
         if state == AutopilotState.TRACKING:
-            if not best_target:
+            if raw_target is None:
+                lost_hold = max(0.0, float(cfg.get("lost_hold_sec", 0.0)))
+                if self._last_target_seen_at and now - self._last_target_seen_at <= lost_hold:
+                    self.stop_wheels()
+                    return
                 LOGGER.info("Auto: Target lost -> SCANNING.")
                 self.autopilot_state = AutopilotState.SCANNING
                 self.auto_state_started_at = now
@@ -901,7 +911,11 @@ class RobotController:
             return
 
         if state == AutopilotState.APPROACHING:
-            if not best_target:
+            if raw_target is None:
+                lost_hold = max(0.0, float(cfg.get("lost_hold_sec", 0.0)))
+                if self._last_target_seen_at and now - self._last_target_seen_at <= lost_hold:
+                    self.stop_wheels()
+                    return
                 LOGGER.info("Auto: Target lost -> SCANNING.")
                 self.autopilot_state = AutopilotState.SCANNING
                 self.auto_state_started_at = now

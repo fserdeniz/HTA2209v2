@@ -58,6 +58,7 @@
     "align_center_tol_ratio": 0.08,
     "align_hold_sec": 0.3,
     "detect_hold_sec": 0.2,
+    "lost_hold_sec": 1.5,
     "target_turn_scale": 0.01,
     "turn_kp": 1.0,
     "turn_kd": 0.3,
