@@ -501,8 +501,8 @@ class RobotController:
             "scan_hold_duration": 3.0,
             "scan_steps": 9999,            # surekli tarama
             "scan_turn_speed": 30.0,
-            "approach_area_threshold": 0.1,
-            "stop_area_threshold": 0.15,
+            "approach_area_threshold": 0.025,
+            "stop_area_threshold": 0.0375,
             "tracking_turn_speed_max": 10.0,
             "tracking_forward_speed_max": 15.0,
             "target_speed_scale": 0.02,
@@ -775,9 +775,12 @@ class RobotController:
             raw_cx = cx
             if self._target_raw_pos is not None:
                 raw_cx = self._target_raw_pos[0]
+            align_cx = raw_cx
+            if self._cx_smooth:
+                align_cx = self._cx_smooth
             tol_ratio = float(cfg.get("align_center_tol_ratio", 0.08))
             tol_px = max(6.0, width * tol_ratio)
-            error = raw_cx - center_x
+            error = align_cx - center_x
             if abs(error) <= tol_px:
                 self.stop_wheels()
                 self.autopilot_state = AutopilotState.APPROACHING
@@ -813,9 +816,13 @@ class RobotController:
                 return
             center_x = width / 2.0
             raw_cx = cx if self._target_raw_pos is None else self._target_raw_pos[0]
+            align_cx = raw_cx
+            if self._cx_smooth:
+                align_cx = self._cx_smooth
             tol_ratio = float(cfg.get("align_center_tol_ratio", 0.08))
             tol_px = max(6.0, width * tol_ratio)
-            if abs(raw_cx - center_x) > tol_px:
+            tol_exit = tol_px * 1.4
+            if abs(align_cx - center_x) > tol_exit:
                 self.autopilot_state = AutopilotState.TRACKING
                 self._step_phase = "idle"
                 self._step_direction = 0
