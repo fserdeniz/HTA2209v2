@@ -161,6 +161,7 @@ class RobotController:
         self._turn_direction: int = 0
         self._detect_hold_until: float = 0.0
         self._last_target_seen_at: float = 0.0
+        self._approach_reached: bool = False
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -629,6 +630,7 @@ class RobotController:
         self._turn_direction = 0
         self._detect_hold_until = 0.0
         self._last_target_seen_at = 0.0
+        self._approach_reached = False
         self._tracking_zone = 0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
@@ -807,6 +809,7 @@ class RobotController:
                 self._turn_phase = "idle"
                 self._turn_direction = 0
                 self._detect_hold_until = 0.0
+                self._approach_reached = False
                 self.stop_all_motion()
                 return
 
@@ -869,6 +872,7 @@ class RobotController:
                 self.auto_state_started_at = now
                 self._step_phase = "idle"
                 self._step_direction = 0
+                self._approach_reached = False
                 LOGGER.debug("Auto: Aligned -> APPROACHING.")
                 return
             self._align_hold_started = 0.0
@@ -921,6 +925,7 @@ class RobotController:
                 self.auto_state_started_at = now
                 self._step_phase = "idle"
                 self._step_direction = 0
+                self._approach_reached = False
                 self.stop_all_motion()
                 return
 
@@ -943,6 +948,7 @@ class RobotController:
                 self._align_hold_started = 0.0
                 self._turn_phase = "idle"
                 self._turn_direction = 0
+                self._approach_reached = False
                 self.stop_wheels()
                 return
 
@@ -959,20 +965,42 @@ class RobotController:
             ratio_for_ctrl = self._area_smooth
 
             target_area = cfg.get("target_area_ratio")
-            tol_area = float(cfg.get("area_tolerance_ratio", 0.0))
+            tol_ratio = float(cfg.get("area_tolerance_ratio", 0.0))
+            target_area_value = None
+            resume_area = None
             if isinstance(target_area, (int, float)):
-                min_area = max(0.0, float(target_area) - tol_area)
+                target_area_value = float(target_area)
+                if 0.0 <= tol_ratio <= 1.0:
+                    tol_area = abs(target_area_value) * tol_ratio
+                else:
+                    tol_area = abs(tol_ratio)
+                resume_area = max(0.0, target_area_value - tol_area)
             else:
-                min_area = cfg["approach_area_threshold"]
+                resume_area = cfg["approach_area_threshold"]
 
-            if ratio_for_ctrl >= min_area:
-                self._step_phase = "idle"
-                self._step_direction = 0
-                self.stop_wheels()
-                return
+            if target_area_value is not None:
+                if self._approach_reached:
+                    if ratio_for_ctrl < resume_area:
+                        self._approach_reached = False
+                    else:
+                        self.stop_wheels()
+                        return
+                if ratio_for_ctrl >= target_area_value:
+                    self._approach_reached = True
+                    self._step_phase = "idle"
+                    self._step_direction = 0
+                    self.stop_wheels()
+                    return
+            else:
+                if ratio_for_ctrl >= resume_area:
+                    self._step_phase = "idle"
+                    self._step_direction = 0
+                    self.stop_wheels()
+                    return
 
             close_stop = float(cfg.get("close_stop_ratio", 0.0))
             if close_stop > 0.0 and ratio_for_ctrl >= close_stop:
+                self._approach_reached = True
                 self._step_phase = "idle"
                 self._step_direction = 0
                 self.stop_wheels()
@@ -989,6 +1017,8 @@ class RobotController:
             base_forward = float(cfg["tracking_forward_speed_max"])
             min_forward = max(0.0, float(cfg.get("target_forward_min", 0.0)))
             forward_speed = max(base_forward * speed_scale, min_forward)
+            if resume_area is not None and ratio_for_ctrl < resume_area:
+                step_pause = 0.0
 
             if self._step_phase == "idle":
                 self._step_phase = "move"
@@ -1002,8 +1032,6 @@ class RobotController:
                     return
                 speed = forward_speed if direction > 0 else forward_speed
                 fwd_cmd = speed if direction > 0 else -speed
-                if self.auto_forward_invert:
-                    fwd_cmd = -fwd_cmd
                 self._set_drive(turn=0.0, forward=fwd_cmd)
                 return
 
