@@ -43,13 +43,16 @@
   },
   "autopilot": {
     "scan_initial_wait": 3.0,
-    "scan_rotate_duration": 0.5,
-    "scan_hold_duration": 5.0,
-    "scan_steps": 18,
+    "scan_rotate_duration": 0.6,
+    "scan_hold_duration": 3.0,
+    "scan_steps": 9999,
     "scan_turn_speed": 30.0,
     "approach_area_threshold": 0.1,
     "stop_area_threshold": 0.15,
     "tracking_turn_speed_max": 10.0,
-    "tracking_forward_speed_max": 15.0
+    "tracking_forward_speed_max": 15.0,
+    "align_center_tol_ratio": 0.08,
+    "step_move_sec": 0.4,
+    "step_pause_sec": 0.35
   }
 }

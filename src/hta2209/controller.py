@@ -151,6 +151,9 @@ class RobotController:
         self._target_raw_pos: Optional[Tuple[int, int]] = None
         self._target_raw_color: Optional[str] = None
         self._tracking_zone: int = 0
+        self._step_phase: str = "idle"
+        self._step_until: float = 0.0
+        self._step_direction: int = 0
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -493,15 +496,18 @@ class RobotController:
 
         # Autopilot ayarlarını yükle
         self.autopilot_config = {
-            "scan_initial_wait": 0.3,
-            "scan_rotate_duration": 0.6,   # ~45° adim
-            "scan_hold_duration": 1.0,     # 2 sn toplam dongu
+            "scan_initial_wait": 3.0,
+            "scan_rotate_duration": 0.6,   # ~45° adim (sureye bagli)
+            "scan_hold_duration": 3.0,
             "scan_steps": 9999,            # surekli tarama
-            "scan_turn_speed": 45.0,
+            "scan_turn_speed": 30.0,
             "approach_area_threshold": 0.1,
             "stop_area_threshold": 0.15,
             "tracking_turn_speed_max": 10.0,
             "tracking_forward_speed_max": 15.0,
+            "align_center_tol_ratio": 0.08,
+            "step_move_sec": 0.4,
+            "step_pause_sec": 0.35,
         }
         autopilot_conf = raw.get("autopilot", {})
         for key, val in autopilot_conf.items():
@@ -592,6 +598,9 @@ class RobotController:
         self._target_smooth_color = None
         self._target_raw_pos = None
         self._target_raw_color = None
+        self._step_phase = "idle"
+        self._step_until = 0.0
+        self._step_direction = 0
         self._tracking_zone = 0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
@@ -704,144 +713,170 @@ class RobotController:
 
         # --- State Machine ---
         state = self.autopilot_state
+        cfg = self.autopilot_config
 
         if state == AutopilotState.IDLE:
+            if self.auto_state_started_at == 0.0:
+                self.auto_state_started_at = now
             self.stop_all_motion()
+            if now - self.auto_state_started_at < cfg["scan_initial_wait"]:
+                return
+            self._step_phase = "idle"
+            self._step_direction = 0
             if best_target:
-                LOGGER.info("Auto: Target found while idle, switching to TRACKING.")
+                LOGGER.info("Auto: Initial wait done, target found -> TRACKING.")
                 self.autopilot_state = AutopilotState.TRACKING
             else:
-                LOGGER.info("Auto: No target, switching to SCANNING.")
+                LOGGER.info("Auto: Initial wait done, target yok -> SCANNING.")
                 self.autopilot_state = AutopilotState.SCANNING
-                self.auto_state_started_at = now
-                self.auto_scan_step = 0
+            self.auto_state_started_at = now
             return
 
         if state == AutopilotState.SCANNING:
-            cfg = self.autopilot_config
-            if self.auto_scan_step == 0 and now - self.auto_state_started_at < cfg["scan_initial_wait"]:
-                self.stop_all_motion()
-                return
-
             if best_target:
-                LOGGER.info("Auto: Target found during scan, switching to TRACKING.")
-                self.stop_all_motion()
-                self._reset_autopilot()
+                LOGGER.info("Auto: Target found during scan -> TRACKING.")
                 self.autopilot_state = AutopilotState.TRACKING
+                self.auto_state_started_at = now
+                self._step_phase = "idle"
+                self._step_direction = 0
+                self.stop_wheels()
                 return
 
-            time_in_state = now - self.auto_state_started_at
-            if time_in_state < cfg["scan_rotate_duration"]:
-                self._set_drive(turn=cfg["scan_turn_speed"], forward=0.0)
-            elif time_in_state < cfg["scan_rotate_duration"] + cfg["scan_hold_duration"]:
+            rotate_dur = max(0.05, float(cfg["scan_rotate_duration"]))
+            hold_dur = max(0.0, float(cfg["scan_hold_duration"]))
+            cycle = rotate_dur + hold_dur
+            if cycle <= 0.0:
                 self.stop_wheels()
+                return
+            phase = (now - self.auto_state_started_at) % cycle
+            if phase < rotate_dur:
+                self._set_drive(turn=cfg["scan_turn_speed"], forward=0.0)
             else:
-                self.auto_scan_step += 1
-                self.auto_state_started_at = now
-                if self.auto_scan_step >= cfg["scan_steps"]:
-                    self.auto_scan_step = 0
-                    LOGGER.info("Auto: Scan loop restarting (continuous).")
-                else:
-                    LOGGER.info(f"Auto: Scan step {self.auto_scan_step}/{cfg['scan_steps']}.")
+                self.stop_wheels()
             return
 
         if state == AutopilotState.TRACKING:
             if not best_target:
-                LOGGER.info("Auto: Target lost during tracking. Returning to IDLE.")
-                self.autopilot_state = AutopilotState.IDLE
-                self._tracking_zone = 0
+                LOGGER.info("Auto: Target lost -> SCANNING.")
+                self.autopilot_state = AutopilotState.SCANNING
+                self.auto_state_started_at = now
+                self._step_phase = "idle"
+                self._step_direction = 0
                 self.stop_all_motion()
                 return
 
-            cx, _cy, area, _depth_norm, mask_ratio, color = best_target
-
-            cfg = self.autopilot_config
-            frame_area = frame_size[0] * frame_size[1]
-            if frame_area <= 0:
-                self.stop_wheels()
-                return
-            normalized_area = area / frame_area
-            ratio_value = mask_ratio if mask_ratio is not None else normalized_area
-            if self._area_smooth == 0.0:
-                self._area_smooth = ratio_value
-            else:
-                self._area_smooth = 0.7 * self._area_smooth + 0.3 * ratio_value
-            ratio_for_ctrl = self._area_smooth
-
-            raw_cx = cx
-            if self._target_raw_pos is not None:
-                raw_cx = self._target_raw_pos[0]
+            cx, _cy, _area, _depth_norm, _mask_ratio, color = best_target
             width = frame_size[0]
             if width <= 0:
                 self.stop_wheels()
                 return
             center_x = width / 2.0
-            x1 = width / 3.0
-            x2 = 2.0 * width / 3.0
-            hysteresis = max(8.0, width * 0.04)
-            zone_turn = self._tracking_zone
-            if zone_turn == 0:
-                if raw_cx < x1:
-                    zone_turn = -1
-                elif raw_cx > x2:
-                    zone_turn = 1
-            elif zone_turn < 0:
-                if raw_cx > x1 + hysteresis:
-                    zone_turn = 0
-            else:
-                if raw_cx < x2 - hysteresis:
-                    zone_turn = 0
-            self._tracking_zone = zone_turn
-
-            turn_cmd = 0.0
-            if zone_turn != 0:
-                error_norm = (raw_cx - center_x) / max(1.0, center_x)
-                error_norm = max(-1.0, min(1.0, error_norm))
-                turn_cmd = error_norm * cfg["tracking_turn_speed_max"]
-            self._drive_turn_smooth = 0.7 * self._drive_turn_smooth + 0.3 * turn_cmd
-
-            base_speed = cfg["tracking_forward_speed_max"]
-            approach_area = cfg["approach_area_threshold"]
-            stop_area = cfg["stop_area_threshold"]
-            if stop_area < approach_area:
-                approach_area, stop_area = stop_area, approach_area
-
-            if ratio_for_ctrl <= approach_area:
-                distance_factor = 1.0 - 0.6 * (ratio_for_ctrl / max(1e-3, approach_area))
-                fwd_cmd = base_speed * distance_factor
-            elif ratio_for_ctrl < stop_area:
-                span = max(1e-3, stop_area - approach_area)
-                distance_factor = (stop_area - ratio_for_ctrl) / span
-                fwd_cmd = base_speed * 0.4 * distance_factor
-            else:
-                retreat_span = max(1e-3, stop_area)
-                retreat_factor = min(1.0, (ratio_for_ctrl - stop_area) / retreat_span)
-                fwd_cmd = -base_speed * retreat_factor
-
-            if zone_turn != 0.0:
-                turn_fwd_cmd = 0.0
-                if ratio_for_ctrl < stop_area:
-                    turn_fwd_cmd = max(0.0, fwd_cmd) * 0.35
-                    if turn_fwd_cmd > 0.0:
-                        turn_fwd_cmd = max(4.0, turn_fwd_cmd)
-                if self.auto_forward_invert:
-                    turn_fwd_cmd = -turn_fwd_cmd
-                self._drive_fwd_smooth = 0.7 * self._drive_fwd_smooth + 0.3 * turn_fwd_cmd
-                self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
+            raw_cx = cx
+            if self._target_raw_pos is not None:
+                raw_cx = self._target_raw_pos[0]
+            tol_ratio = float(cfg.get("align_center_tol_ratio", 0.08))
+            tol_px = max(6.0, width * tol_ratio)
+            error = raw_cx - center_x
+            if abs(error) <= tol_px:
+                self.stop_wheels()
+                self.autopilot_state = AutopilotState.APPROACHING
+                self.auto_state_started_at = now
+                self._step_phase = "idle"
+                self._step_direction = 0
+                LOGGER.debug("Auto: Aligned -> APPROACHING.")
                 return
 
-            if fwd_cmd > 0.0:
-                fwd_cmd = max(4.0, fwd_cmd)
-            if self.auto_forward_invert:
-                fwd_cmd = -fwd_cmd
-            self._drive_fwd_smooth = 0.7 * self._drive_fwd_smooth + 0.3 * fwd_cmd
-            self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
-            LOGGER.debug(
-                f"Auto TRACKING: Target={color}, Ratio={ratio_for_ctrl:.3f}, Fwd={self._drive_fwd_smooth:.1f}, Turn={self._drive_turn_smooth:.1f}"
-            )
+            error_norm = min(1.0, abs(error) / max(1.0, center_x))
+            turn_cmd = error_norm * cfg["tracking_turn_speed_max"]
+            if error < 0:
+                turn_cmd = -turn_cmd
+            self._set_drive(turn=turn_cmd, forward=0.0)
+            LOGGER.debug("Auto TRACKING: Target=%s, Turn=%.1f", color, turn_cmd)
             return
 
-        if state in (AutopilotState.APPROACHING, AutopilotState.GRASPING):
+        if state == AutopilotState.APPROACHING:
+            if not best_target:
+                LOGGER.info("Auto: Target lost -> SCANNING.")
+                self.autopilot_state = AutopilotState.SCANNING
+                self.auto_state_started_at = now
+                self._step_phase = "idle"
+                self._step_direction = 0
+                self.stop_all_motion()
+                return
+
+            cx, _cy, area, _depth_norm, mask_ratio, _color = best_target
+            width, height = frame_size
+            if width <= 0 or height <= 0:
+                self.stop_wheels()
+                return
+            center_x = width / 2.0
+            raw_cx = cx if self._target_raw_pos is None else self._target_raw_pos[0]
+            tol_ratio = float(cfg.get("align_center_tol_ratio", 0.08))
+            tol_px = max(6.0, width * tol_ratio)
+            if abs(raw_cx - center_x) > tol_px:
+                self.autopilot_state = AutopilotState.TRACKING
+                self._step_phase = "idle"
+                self._step_direction = 0
+                self.stop_wheels()
+                return
+
+            frame_area = float(width * height)
+            normalized_area = area / frame_area
+            ratio_value = mask_ratio if mask_ratio is not None else normalized_area
+            if self._area_smooth == 0.0:
+                self._area_smooth = ratio_value
+            else:
+                if ratio_value > self._area_smooth:
+                    self._area_smooth = 0.4 * self._area_smooth + 0.6 * ratio_value
+                else:
+                    self._area_smooth = 0.7 * self._area_smooth + 0.3 * ratio_value
+            ratio_for_ctrl = self._area_smooth
+
+            min_area = cfg["approach_area_threshold"]
+            max_area = cfg["stop_area_threshold"]
+            if max_area < min_area:
+                min_area, max_area = max_area, min_area
+
+            if min_area <= ratio_for_ctrl <= max_area:
+                self._step_phase = "idle"
+                self._step_direction = 0
+                self.stop_wheels()
+                return
+
+            direction = 1 if ratio_for_ctrl < min_area else -1
+            if direction != self._step_direction:
+                self._step_phase = "idle"
+                self._step_direction = direction
+
+            step_move = max(0.05, float(cfg.get("step_move_sec", 0.4)))
+            step_pause = max(0.0, float(cfg.get("step_pause_sec", 0.35)))
+            forward_speed = float(cfg["tracking_forward_speed_max"])
+            reverse_speed = float(cfg.get("tracking_reverse_speed", forward_speed * 0.6))
+
+            if self._step_phase == "idle":
+                self._step_phase = "move"
+                self._step_until = now + step_move
+
+            if self._step_phase == "move":
+                if now >= self._step_until:
+                    self._step_phase = "pause"
+                    self._step_until = now + step_pause
+                    self.stop_wheels()
+                    return
+                speed = forward_speed if direction > 0 else reverse_speed
+                fwd_cmd = speed if direction > 0 else -speed
+                if self.auto_forward_invert:
+                    fwd_cmd = -fwd_cmd
+                self._set_drive(turn=0.0, forward=fwd_cmd)
+                return
+
+            if self._step_phase == "pause":
+                self.stop_wheels()
+                if now >= self._step_until:
+                    self._step_phase = "idle"
+                return
+
+        if state == AutopilotState.GRASPING:
             self.stop_all_motion()
             self.autopilot_state = AutopilotState.TRACKING
             return
