@@ -515,6 +515,7 @@ class RobotController:
             "tracking_forward_speed_max": 15.0,
             "target_speed_scale": 0.02,
             "target_turn_scale": 0.01,
+            "target_forward_min": 4.0,
             "align_center_tol_ratio": 0.08,
             "align_hold_sec": 0.3,
             "detect_hold_sec": 0.2,
@@ -972,7 +973,8 @@ class RobotController:
             step_pause = max(0.0, float(cfg.get("step_pause_sec", 0.35)))
             speed_scale = max(0.0, float(cfg.get("target_speed_scale", 1.0)))
             base_forward = float(cfg["tracking_forward_speed_max"])
-            forward_speed = base_forward * speed_scale
+            min_forward = max(0.0, float(cfg.get("target_forward_min", 0.0)))
+            forward_speed = max(base_forward * speed_scale, min_forward)
 
             if self._step_phase == "idle":
                 self._step_phase = "move"

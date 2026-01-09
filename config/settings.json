@@ -54,6 +54,7 @@
     "tracking_turn_speed_max": 10.0,
     "tracking_forward_speed_max": 15.0,
     "target_speed_scale": 0.02,
+    "target_forward_min": 4.0,
     "align_center_tol_ratio": 0.08,
     "align_hold_sec": 0.3,
     "detect_hold_sec": 0.2,
@@ -64,7 +65,7 @@
     "turn_step_sec": 0.2,
     "turn_pause_sec": 0.2,
     "close_stop_ratio": 0.6,
-    "step_move_sec": 0.4,
+    "step_move_sec": 0.1,
     "step_pause_sec": 0.35
   }
 }
