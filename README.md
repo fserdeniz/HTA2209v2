@@ -1,4 +1,4 @@
-# RPi Renk Tabanli Mobil Manipulator
+# RPi YOLO Tabanli Mobil Manipulator
 
 Bu depo, Raspberry Pi 4B (8 GB) uzerinde calisan, YOLOv8 ile hedef nesneleri algilayip yaklasan ve PCA9685 PWM surucu karti uzerinden hem mobil platformu hem de robotik kolu yoneten sistem icin baslangic altyapisini sunar.
 
@@ -10,9 +10,9 @@ Bu depo, Raspberry Pi 4B (8 GB) uzerinde calisan, YOLOv8 ile hedef nesneleri alg
 - CSI veya USB kamera (gorsel algilama icin)
 
 ## Yazilim Bilesenleri
-- `src/hta2209/controller.py`: PCA9685 kanallarini soyutlayan, tekerlek hizlari, eklem acilari ve HSV esiklerini saklayip kaydeden denetleyici. Donanim bagli degilse otomatik olarak simulasyon moduna gecer.
-- `src/hta2209/gui.py`: Tkinter ile yazilmis GUI; renk esikleri, surus ve kol kontrolu, Manual/Auto mod secimi ve OpenCV + Pillow kullanarak kamera onizlemesi sunar.
-- `src/hta2209/detector.py`: YOLOv8 modeliyle hedef tespiti ve kamera onizlemesi icin basit AI (kenar/renk) analizleri.
+- `src/hta2209/controller.py`: PCA9685 kanallarini soyutlayan, tekerlek hizlari ve eklem acilari denetleyicisi. Donanim bagli degilse otomatik olarak simulasyon moduna gecer.
+- `src/hta2209/gui.py`: Tkinter ile yazilmis GUI; surus ve kol kontrolu, Manual/Auto mod secimi ve OpenCV + Pillow kullanarak kamera onizlemesi sunar.
+- `src/hta2209/detector.py`: YOLOv8 modeliyle hedef tespiti (Auto mod) ve kutu secimi.
 - `requirements.txt`: OpenCV, NumPy, Ultralytics (YOLOv8), Adafruit suruculeri ve Pillow dahil gerekli Python paketleri.
 
 ## Kurulum
@@ -56,12 +56,12 @@ python -m hta2209.gui --config config/settings.json --log-level INFO
   ```
   komutu GUI'yi dogrudan baslatir; Windows/Mac/Linux hepsinde gecerli bir console script olusturuldu.
 
-- **Orta panel (Kamera)**: Kamera onizlemesi her zaman merkezde kalir, ortam aydinlatmasi icin otomatik S/V uyarlama yapabilir. Sol panelden kamera indexini secip Baslat/Durdur yapabilirsiniz.
+- **Orta panel (Kamera)**: Kamera onizlemesi her zaman merkezde kalir. Sol panelden kamera indexini secip Baslat/Durdur yapabilirsiniz.
 - **Sol panel (Ayarlar)**: Manual/Auto mod secimi, konfig kaydet/yukle ve kamera kontrol butonlari. Kamera kaynagi (Picamera2/OpenCV), OpenCV indeks ve goruntu ayarlari (parlaklik/kontrast/doygunluk/hue/gain) buradadir.
 - **Calisma Durumu**: Baslat/Duraklat/Durdur butonlari; Baslat olmadan surus ve autopilot calismaz, Duraklat/Durdur tum hareketi aninda durdurur.
 - **Sag sekmeler**:
   - **Baglanti**: Donanimin hazir olup olmadigini ve konfig dosyasini gosterir.
-  - **Renk Esikleri**: HSV bandlarini (H min/max, S min/max, V min/max) ayarlayin. Maske onizleme ile secilen renge gore maske + kontur overlay gorulebilir.
+  - **YOLO**: Auto modda yalnizca YOLOv8 ile hedef tespiti yapilir; model ve sinif bilgisi gosterilir.
   - **Surus Kontrol**: Her tekerlek icin -100/+100 arasi hiz; "Tekerlekleri Durdur" tum throttle'i sifirlar.
   - **Robot Kol**: Baz, omuz, dirsek, bilek ve gripper servo acilarini 0-180 derece arasinda degistirin.
   - **Grafikler**: Mod, simülasyon durumu, hedef sinif ve ek metrikleri (PWM, volt/akim/guc) gosterir.
@@ -75,7 +75,7 @@ GUI ust kismindaki "Kaydet" mevcut durumu `config/settings.json` dosyasina yazar
 ## YOLOv8 Modeli (Auto)
 - Model dosyasi: `hta2209.pt` (depo kok dizininde)
 - Sinif: `red`
-- Calisma: CPU uzerinde calisir; model yuklenemezse log paneline hata yazilir ve HSV tabanli eski takip devreye girer.
+- Calisma: CPU uzerinde calisir; model yuklenemezse log paneline hata yazilir ve auto mod hareket etmez.
 
 Klavye (Manual mod):
 - Yon tuslari: Ileri/geri hiz ve donus bilesenlerini +/-10 degistirir (`Space` = acil durdur).
@@ -99,6 +99,6 @@ Klavye (Manual mod):
 - **Windows**: VcXsrv/Xming'i baslatin, `ssh -X` ile baglanin. Isterseniz GUI'yi tamamen yerelde de calistirabilirsiniz; donanim yoksa simulasyon modunda kalir.
 
 ## Sonraki Adimlar
-- OpenCV tabanli renk tespiti ve hedef takibini `src/` altinda yeni modullerle ekleyin.
+- YOLOv8 modelini yeni veri ile gelistirin ve `hta2209.pt` dosyasini guncelleyin.
 - Auto moduna otonom surus/kol stratejilerini baglayin.
 - PCA9685 kanal konfiglerini `.env` veya ek JSON dosyalariyla parametrik hale getirin.

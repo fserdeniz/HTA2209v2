@@ -30,15 +30,6 @@ LOGGER.setLevel(logging.INFO)
 # GUI log paneline controller loglarini aktaracak handler
 from .controller import GuiLogHandler
 
-THRESHOLD_FIELDS = (
-    ("hue_min", 0, 179),
-    ("hue_max", 0, 179),
-    ("sat_min", 0, 255),
-    ("sat_max", 0, 255),
-    ("val_min", 0, 255),
-    ("val_max", 0, 255),
-)
-
 CAMERA_CONTROL_FIELDS = (
     ("brightness", 0, 255),
     ("contrast", 0, 255),
@@ -66,7 +57,7 @@ class HTAControlGUI:
     def __init__(self, controller: RobotController) -> None:
         self.controller = controller
         self.root = tk.Tk()
-        self.root.title("HTA2209 - Renk Bazli Mobil Manipulator")
+        self.root.title("HTA2209 - YOLO Bazli Mobil Manipulator")
         self.root.geometry("1000x700")
         self._updating = False
         # Controller loglarini GUI paneline aktar
@@ -100,18 +91,9 @@ class HTAControlGUI:
         self.camera_loop_id: str | None = None
         self._camera_photo = None
         self._last_frame = None
-        self._auto_frame_counter = 0
         self.cv2_cap = None
-        self._mask_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        self.ai_detection_var = tk.BooleanVar(value=False)
-        self.ai_colors_var = tk.StringVar(value="")
-        self.mask_preview_var = tk.BooleanVar(value=False)
-        self.mask_preview_color_var = tk.StringVar(value=self.controller.auto_target_color)
-        self.mask_preview_only_var = tk.BooleanVar(value=False)
-        self.mask_preview_dilate_var = tk.BooleanVar(value=False)
         self.metric_labels: Dict[str, tk.StringVar] = {}
 
-        self.threshold_vars: Dict[str, Dict[str, tk.IntVar]] = {}
         self.camera_control_vars: Dict[str, tk.IntVar] = {}
         self.wheel_scales: Dict[str, ttk.Scale] = {}
         self.wheel_value_labels: Dict[str, tk.StringVar] = {}
@@ -120,7 +102,6 @@ class HTAControlGUI:
         self.stop_button: ttk.Button | None = None
         self.drive_buttons: list[ttk.Button] = []
         self.require_hardware_var = tk.BooleanVar(value=False)
-        self.auto_threshold_var = tk.BooleanVar(value=False)
         self.test_output: scrolledtext.ScrolledText | None = None
         self.repo_root = Path(__file__).resolve().parents[2]
         self.yolo_detector = detector.YoloDetector(self.repo_root / "hta2209.pt")
@@ -184,7 +165,7 @@ class HTAControlGUI:
         notebook = ttk.Notebook(tabs_frame)
         notebook.pack(fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 5))
         notebook.add(self._connection_tab(notebook), text="Baglanti")
-        notebook.add(self._threshold_tab(notebook), text="Renk Esikleri")
+        notebook.add(self._yolo_tab(notebook), text="YOLO")
         notebook.add(self._drive_tab(notebook), text="Surus Kontrol")
         notebook.add(self._arm_tab(notebook), text="Robot Kol")
         notebook.add(self._metrics_tab(notebook), text="Grafikler")
@@ -235,102 +216,20 @@ class HTAControlGUI:
         return frame
 
     # ------------------------------------------------------------------ #
-    def _threshold_tab(self, parent: ttk.Notebook) -> ttk.Frame:
+    def _yolo_tab(self, parent: ttk.Notebook) -> ttk.Frame:
         frame = ttk.Frame(parent, padding=10)
-        for idx, color in enumerate(self.controller.colors()):
-            lf = ttk.LabelFrame(frame, text=color.title(), padding=10)
-            lf.grid(row=idx // 2, column=idx % 2, padx=10, pady=10, sticky="nsew")
-            frame.grid_columnconfigure(idx % 2, weight=1)
-            self.threshold_vars[color] = {}
-            for row, (field_name, min_val, max_val) in enumerate(THRESHOLD_FIELDS):
-                ttk.Label(lf, text=field_name.replace("_", " ").title()).grid(row=row, column=0, sticky="w")
-                var = tk.IntVar(value=0)
-                spin = tk.Spinbox(
-                    lf,
-                    from_=min_val,
-                    to=max_val,
-                    textvariable=var,
-                    width=5,
-                    command=self._make_threshold_callback(color, field_name, var),
-                )
-                spin.grid(row=row, column=1, padx=5, pady=2)
-                var.trace_add("write", self._make_threshold_trace(color, field_name, var))
-                self.threshold_vars[color][field_name] = var
-
-        auto_box = ttk.LabelFrame(frame, text="Otomatik Esikleme", padding=10)
-        auto_box.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
-        ttk.Checkbutton(
-            auto_box,
-            text="Ortama gore S/V otomatik uyarla (kamera karelerinden)",
-            variable=self.auto_threshold_var,
-            command=self._on_auto_threshold_toggle,
-        ).pack(anchor="w", pady=(0, 5))
-        ttk.Button(auto_box, text="Anlik Kalibre Et (guncel kare)", command=self._manual_auto_calibrate).pack(
-            anchor="w"
+        ttk.Label(frame, text="Auto modda yalnizca YOLOv8 kullanilir.", font=("Segoe UI", 11, "bold")).pack(
+            anchor="w", pady=(0, 8)
         )
+        ttk.Label(frame, text=f"Model: {self.yolo_detector.model_path}").pack(anchor="w", pady=2)
+        ttk.Label(frame, text=f"Sinif: {self.yolo_target_class}").pack(anchor="w", pady=2)
         ttk.Label(
-            auto_box,
-            text="Kamera acik olmalidir. Manual esikler her zaman düzenlenebilir; otomatik mod aktifken S/V esikleri karelere gore guncellenir.",
+            frame,
+            text="Not: Model bulunamazsa auto mod hedef tespiti yapmaz.",
             wraplength=700,
             justify=tk.LEFT,
-        ).pack(anchor="w", pady=5)
-
-        ai_box = ttk.LabelFrame(frame, text="Yapay Zeka Kenar/Renk", padding=10)
-        ai_box.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
-        self.ai_checkbox = ttk.Checkbutton(
-            ai_box,
-            text="AI destekli kenar + renk tespiti (kamera onizlemesinde)",
-            variable=self.ai_detection_var,
-        )
-        self.ai_checkbox.pack(anchor="w", pady=(0, 5))
-        ttk.Label(ai_box, textvariable=self.ai_colors_var, wraplength=700, justify=tk.LEFT).pack(anchor="w")
-
-        mask_box = ttk.LabelFrame(frame, text="Maske Onizleme", padding=10)
-        mask_box.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
-        ttk.Checkbutton(
-            mask_box,
-            text="Canli maske + kontur goster",
-            variable=self.mask_preview_var,
-        ).pack(anchor="w", pady=(0, 4))
-        color_row = ttk.Frame(mask_box)
-        color_row.pack(anchor="w", pady=(0, 4))
-        ttk.Label(color_row, text="Renk:").pack(side=tk.LEFT)
-        color_combo = ttk.Combobox(
-            color_row,
-            values=list(self.controller.colors()),
-            textvariable=self.mask_preview_color_var,
-            state="readonly",
-            width=10,
-        )
-        color_combo.pack(side=tk.LEFT, padx=5)
-        ttk.Checkbutton(
-            mask_box,
-            text="Sadece maske goruntusu (siyah-beyaz)",
-            variable=self.mask_preview_only_var,
-        ).pack(anchor="w", pady=(0, 4))
-        ttk.Checkbutton(
-            mask_box,
-            text="Maske genislet (dilate) uygula",
-            variable=self.mask_preview_dilate_var,
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(8, 0))
         return frame
-
-    def _make_threshold_callback(self, color: str, field_name: str, var: tk.IntVar):
-        def callback() -> None:
-            self._on_threshold_change(color, field_name, var.get())
-
-        return callback
-
-    def _make_threshold_trace(self, color: str, field_name: str, var: tk.IntVar):
-        def trace(*_args) -> None:
-            if self._updating:
-                return
-            self._on_threshold_change(color, field_name, var.get())
-
-        return trace
-
-    def _on_threshold_change(self, color: str, field_name: str, value: int) -> None:
-        self.controller.set_color_threshold(color, field_name, value)
 
     def _make_camera_control_callback(self, field_name: str, var: tk.IntVar):
         def callback() -> None:
@@ -537,8 +436,6 @@ class HTAControlGUI:
             ("Simulasyon", "simulation"),
             ("Calisma", "run_state"),
             ("Auto hedef sinif", "auto_target_color"),
-            ("Otomatik esikleme", "auto_threshold"),
-            ("Auto kavrama", "auto_grasped"),
             ("Kaynak Voltaji (V)", "supply_voltage"),
             ("Anlik Akim (A)", "supply_current"),
             ("Guc Tuketimi (W)", "power_w"),
@@ -649,7 +546,6 @@ class HTAControlGUI:
 
     def _start_stream(self) -> None:
         self._stop_stream()
-        self._auto_frame_counter = 0
         source = self.camera_source_var.get()
         self.controller.camera_source = source
         self._on_camera_index_change()
@@ -751,38 +647,6 @@ class HTAControlGUI:
         cv2.line(frame, (x2, 0), (x2, height - 1), guide_color, 1)
         return frame
 
-    def _apply_mask_preview(self, frame):
-        if self._last_frame is None or frame is None or frame.size == 0:
-            return frame
-        color = self.mask_preview_color_var.get()
-        if color not in self.controller.color_thresholds:
-            return frame
-        hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-        mask = self.controller.build_color_mask(hsv, color)
-        if self.mask_preview_dilate_var.get():
-            mask = cv2.dilate(mask, self._mask_kernel, iterations=1)
-
-        if self.mask_preview_only_var.get():
-            preview = cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB)
-        else:
-            preview = frame.copy()
-            overlay = preview.copy()
-            overlay[mask > 0] = (0, 255, 0)
-            preview = cv2.addWeighted(preview, 0.7, overlay, 0.3, 0)
-
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if contours:
-            largest = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(largest)
-            min_area = max(500.0, mask.shape[0] * mask.shape[1] * 0.001)
-            if area >= min_area:
-                x, y, w, h = cv2.boundingRect(largest)
-                cv2.rectangle(preview, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                cx = int(x + w / 2)
-                cy = int(y + h / 2)
-                cv2.circle(preview, (cx, cy), 5, (255, 0, 0), -1)
-        return preview
-
     def _run_yolo_detection(self, frame_rgb):
         if self._yolo_disabled:
             return [], None
@@ -882,38 +746,19 @@ class HTAControlGUI:
         self._last_frame = frame
         display_frame = self._last_frame
 
-        colors = []
-        if self.ai_detection_var.get():
-            overlay, colors = detector.analyze_frame(self._last_frame)
-            display_frame = overlay
-            if colors:
-                color_names = ", ".join([c[0] for c in colors])
-                self.ai_colors_var.set(f"Dominant renkler: {color_names}")
-            else:
-                self.ai_colors_var.set("Dominant renk bulunamadi")
-        else:
-            self.ai_colors_var.set("")
-
-        dominant_list = [c[0] for c in colors] if colors else None
-        self.controller.set_dominant_colors_hint(dominant_list)
-
-        if self.mask_preview_var.get():
-            display_frame = self._apply_mask_preview(display_frame)
-
         if not self.controller.is_manual():
             yolo_detections, yolo_target = self._run_yolo_detection(self._last_frame)
-            use_external_target = not self._yolo_disabled
             if yolo_detections:
                 display_frame = self._draw_yolo_detections(display_frame, yolo_detections)
-            hsv = None
-            if not use_external_target:
-                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-            self.controller.autopilot_step(
-                hsv,
-                (display_frame.shape[1], display_frame.shape[0]),
-                target=yolo_target,
-                use_external_target=use_external_target,
-            )
+            if self._yolo_disabled:
+                self.controller.stop_all_motion()
+                self.controller.last_target = None
+                self.controller.last_target_color = None
+            else:
+                self.controller.autopilot_step(
+                    yolo_target,
+                    (display_frame.shape[1], display_frame.shape[0]),
+                )
             if self.controller.last_target:
                 lt = self.controller.last_target
                 cx, cy, area = lt[0], lt[1], lt[2]
@@ -955,12 +800,6 @@ class HTAControlGUI:
             self.camera_label.configure(image=photo, text="")
             self.camera_label.image = photo  # type: ignore[attr-defined]
         self._camera_photo = photo
-
-        self._auto_frame_counter += 1
-        if self.controller.auto_threshold_enabled and self._auto_frame_counter % 10 == 0:
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-            self.controller.auto_calibrate_from_frame(hsv)
-            self._refresh_threshold_fields()
 
         self.camera_loop_id = self.root.after(CAMERA_FRAME_INTERVAL_MS, self._update_camera_frame)
 
@@ -1268,18 +1107,8 @@ class HTAControlGUI:
             return
         if selected == "auto":
             self._reset_manual_motion()
-            # Auto modda AI destekli tespit otomatik acilsin
-            self.ai_detection_var.set(True)
-            try:
-                self.ai_checkbox.state(["disabled"])
-            except Exception:
-                pass
         else:
             self.refresh_from_controller()
-            try:
-                self.ai_checkbox.state(["!disabled"])
-            except Exception:
-                pass
         self.controller.auto_target_color = self.target_color_var.get()
         self._append_log(f"Mod {self.controller.mode} olarak ayarlandi")
 
@@ -1299,10 +1128,6 @@ class HTAControlGUI:
         self._append_log(f"Calisma durumu: {state}")
         self.refresh_from_controller()
 
-    def _on_auto_threshold_toggle(self) -> None:
-        enabled = self.auto_threshold_var.get()
-        self.controller.set_auto_threshold_enabled(enabled)
-
     # ------------------------------------------------------------------ #
     def _sync_picam_color_order(self) -> None:
         if self.picam is None:
@@ -1316,15 +1141,6 @@ class HTAControlGUI:
             self._picam_color_order = "bgr"
         elif "RGB" in fmt:
             self._picam_color_order = "rgb"
-
-    def _manual_auto_calibrate(self) -> None:
-        if self._last_frame is None:
-            messagebox.showerror("Kamera", "Kamera acik degil veya kare yok.")
-            return
-        hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-        self.controller.auto_calibrate_from_frame(hsv)
-        self._refresh_threshold_fields()
-        messagebox.showinfo("Otomatik", "S/V esikleri guncellendi (guncel kare).")
 
     def _on_target_color_change(self) -> None:
         self.controller.auto_target_color = self.target_color_var.get()
@@ -1351,14 +1167,6 @@ class HTAControlGUI:
             widget.configure(state="normal" if enabled else "disabled")
 
     # ------------------------------------------------------------------ #
-    def _refresh_threshold_fields(self) -> None:
-        self._updating = True
-        for color, fields in self.threshold_vars.items():
-            threshold = self.controller.color_thresholds[color]
-            for field_name, var in fields.items():
-                var.set(getattr(threshold, field_name))
-        self._updating = False
-
     def refresh_from_controller(self) -> None:
         self._updating = True
         mode_label = f"Mod: {self.controller.mode.title()}"
@@ -1374,15 +1182,12 @@ class HTAControlGUI:
         self.mode_var.set(self.controller.mode)
         self.simulation_var.set(sim)
         self.run_state_var.set(f"Durum: {self.controller.run_state}")
-        self.auto_threshold_var.set(self.controller.auto_threshold_enabled)
         self.target_color_var.set(self.controller.auto_target_color)
         self.camera_source_var.set(self.controller.camera_source)
         self.camera_index_var.set(self.controller.camera_index)
         for name, var in self.camera_control_vars.items():
             var.set(self.controller.camera_controls.get(name, var.get()))
         self._update_camera_source_ui()
-
-        self._refresh_threshold_fields()
 
         for wheel, scale in self.wheel_scales.items():
             value = self.controller.wheel_state[wheel]
@@ -1416,12 +1221,6 @@ class HTAControlGUI:
             rs = metrics.get("run_state", "")
             self.metric_labels.get("run_state", tk.StringVar()).set(rs)
             self.metric_labels.get("auto_target_color", tk.StringVar()).set(metrics.get("auto_target_color", ""))
-            self.metric_labels.get("auto_threshold", tk.StringVar()).set(
-                "acik" if metrics.get("auto_threshold") else "kapali"
-            )
-            self.metric_labels.get("auto_grasped", tk.StringVar()).set(
-                "tamamlandi" if metrics.get("auto_grasped") else "bekleniyor"
-            )
             sv = metrics.get("supply_voltage", 0.0)
             sc = metrics.get("supply_current", 0.0)
             pw = metrics.get("power_w", 0.0)

@@ -2,7 +2,6 @@
   "mode": "manual",
   "simulation": false,
   "run_state": "started",
-  "auto_threshold": false,
   "auto_target_color": "red",
   "wheel_polarity": {
     "front_left": 1,
@@ -23,63 +22,5 @@
   "servo_channels": {
     "joint": 0,
     "gripper": 3
-  },
-  "thresholds": {
-    "red": {
-      "hue_min": 0,
-      "hue_max": 15,
-      "sat_min": 80,
-      "sat_max": 255,
-      "val_min": 80,
-      "val_max": 255
-    },
-    "green": {
-      "hue_min": 45,
-      "hue_max": 90,
-      "sat_min": 80,
-      "sat_max": 255,
-      "val_min": 80,
-      "val_max": 255
-    },
-    "blue": {
-      "hue_min": 100,
-      "hue_max": 140,
-      "sat_min": 80,
-      "sat_max": 255,
-      "val_min": 80,
-      "val_max": 255
-    },
-    "yellow": {
-      "hue_min": 20,
-      "hue_max": 40,
-      "sat_min": 80,
-      "sat_max": 255,
-      "val_min": 80,
-      "val_max": 255
-    },
-    "orange": {
-      "hue_min": 5,
-      "hue_max": 25,
-      "sat_min": 80,
-      "sat_max": 255,
-      "val_min": 80,
-      "val_max": 255
-    },
-    "purple": {
-      "hue_min": 130,
-      "hue_max": 165,
-      "sat_min": 80,
-      "sat_max": 255,
-      "val_min": 80,
-      "val_max": 255
-    },
-    "cyan": {
-      "hue_min": 80,
-      "hue_max": 100,
-      "sat_min": 80,
-      "sat_max": 255,
-      "val_min": 80,
-      "val_max": 255
-    }
   }
 }

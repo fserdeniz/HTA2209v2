@@ -10,10 +10,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum, auto
 from pathlib import Path
-from typing import Dict, Tuple, Optional, Sequence
-
-import numpy as np
-import cv2
+from typing import Dict, Tuple, Optional
 
 try:
     from adafruit_servokit import ServoKit
@@ -61,7 +58,6 @@ DEFAULT_L298N_PINS = {
 }
 
 SUPPORTED_MODES = ("manual", "auto")
-DEFAULT_COLORS = ("red", "green", "blue", "yellow", "orange", "purple", "cyan")
 
 
 class AutopilotState(Enum):
@@ -90,37 +86,9 @@ class GuiLogHandler(logging.Handler):
 
 
 @dataclass
-class Threshold:
-    hue_min: int = 0
-    hue_max: int = 30
-    sat_min: int = 50
-    sat_max: int = 255
-    val_min: int = 50
-    val_max: int = 255
-
-    def clamp(self) -> "Threshold":
-        self.hue_min = max(0, min(179, self.hue_min))
-        self.hue_max = max(0, min(179, self.hue_max))
-        self.sat_min = max(0, min(255, self.sat_min))
-        self.sat_max = max(0, min(255, self.sat_max))
-        self.val_min = max(0, min(255, self.val_min))
-        self.val_max = max(0, min(255, self.val_max))
-        return self
-
-    def as_dict(self) -> Dict[str, int]:
-        return {
-            "hue_min": self.hue_min,
-            "hue_max": self.hue_max,
-            "sat_min": self.sat_min,
-            "sat_max": self.sat_max,
-            "val_min": self.val_min,
-            "val_max": self.val_max,
-        }
-
-
 class RobotController:
     """
-    PCA9685 channel abstraction, threshold management, and a basic color-follow autopilot.
+    PCA9685 channel abstraction and YOLO-driven autopilot control.
     """
 
     def __init__(self, config_path: Path | str = "config/settings.json", channels: int = 16) -> None:
@@ -157,20 +125,7 @@ class RobotController:
         self.arm_state: Dict[str, float] = {
             joint: 0.0 if joint in self.continuous_joints else 90.0 for joint in self.servo_channels
         }
-        default_thr = {
-            "red": Threshold(0, 20, 60, 255, 50, 255),
-            "orange": Threshold(5, 25, 80, 255, 80, 255),
-            "yellow": Threshold(18, 45, 60, 255, 50, 255),
-            "green": Threshold(45, 90, 80, 255, 80, 255),
-            "cyan": Threshold(80, 100, 80, 255, 80, 255),
-            "blue": Threshold(100, 140, 80, 255, 80, 255),
-            "purple": Threshold(130, 165, 80, 255, 80, 255),
-        }
-        self.color_thresholds: Dict[str, Threshold] = {color: default_thr.get(color, Threshold()).clamp() for color in DEFAULT_COLORS}
-        self.auto_threshold_enabled: bool = False
-        self.auto_target_color: str = DEFAULT_COLORS[0]
-        self.dominant_colors_hint: Tuple[str, ...] = tuple()
-        self.auto_grasped: bool = False
+        self.auto_target_color: str = "red"
         self.auto_forward_invert: bool = False
         self.mode: str = "manual"
         self.simulation_enabled: bool = False
@@ -186,18 +141,11 @@ class RobotController:
         self.power_consumption_w: float = 0.0
         self.pwm_frequency_hz: float = 50.0
         self.pwm_output: Dict[str, float] = {wheel: 0.0 for wheel in WHEEL_CHANNELS}
-        self.gripper_burst_until: float = 0.0
-        self.gripper_reverse_until: float = 0.0
-        self._last_auto_calib: float = 0.0
         self._area_smooth: float = 0.0
         self._cx_smooth: float = 0.0
         self._cy_smooth: float = 0.0
         self._drive_turn_smooth: float = 0.0
         self._drive_fwd_smooth: float = 0.0
-        self._blue_release_cooldown: float = 0.0
-        self._blue_confirm_hits: int = 0
-        self._blue_last_seen_time: float = 0.0
-        self._blue_last_pos: Optional[Tuple[int, int]] = None
         self._target_hold_until: float = 0.0
         self._target_smooth_color: Optional[str] = None
         self._target_raw_pos: Optional[Tuple[int, int]] = None
@@ -415,15 +363,6 @@ class RobotController:
         except Exception as exc:
             LOGGER.error("Continuous eklem %s icin throttle ayarlanamadi: %s", joint, exc)
 
-    def set_color_threshold(self, color: str, field_name: str, value: int) -> None:
-        if color not in self.color_thresholds:
-            raise ValueError(f"Bilinmeyen renk: {color}")
-        if not hasattr(self.color_thresholds[color], field_name):
-            raise ValueError(f"Bilinmeyen alan: {field_name}")
-        setattr(self.color_thresholds[color], field_name, int(value))
-        self.color_thresholds[color].clamp()
-        LOGGER.debug("Renk %s alan %s degeri %s olarak kaydedildi.", color, field_name, value)
-
     # ------------------------------------------------------------------ #
     # Persistence helpers
     # ------------------------------------------------------------------ #
@@ -432,7 +371,6 @@ class RobotController:
             "mode": self.mode,
             "simulation": self.simulation_enabled,
             "run_state": self.run_state,
-            "auto_threshold": self.auto_threshold_enabled,
             "auto_target_color": self.auto_target_color,
             "auto_forward_invert": self.auto_forward_invert,
             "wheel_polarity": self.wheel_polarity,
@@ -452,7 +390,6 @@ class RobotController:
                 "controls": dict(self.camera_controls),
             },
             "autopilot": dict(self.autopilot_config),
-            "thresholds": {color: thr.as_dict() for color, thr in self.color_thresholds.items()},
         }
 
     def save_config(self) -> None:
@@ -536,12 +473,6 @@ class RobotController:
                     self.servo_channels[joint] = int(ch)
                 except Exception:
                     pass
-        for color, payload in raw.get("thresholds", {}).items():
-            if color in self.color_thresholds:
-                for field_name, val in payload.items():
-                    if hasattr(self.color_thresholds[color], field_name):
-                        setattr(self.color_thresholds[color], field_name, int(val))
-                self.color_thresholds[color].clamp()
         mode_name = raw.get("mode", "manual")
         # eski konfigurasyonlarda simulation bir mode olarak gelebilir
         if mode_name.lower() == "simulation":
@@ -551,9 +482,8 @@ class RobotController:
             self.set_mode(mode_name)
         except ValueError:
             LOGGER.warning("Bilinmeyen kontrol modu %s, manuel mod kullanilacak.", mode_name)
-        self.auto_threshold_enabled = bool(raw.get("auto_threshold", False))
-        target = raw.get("auto_target_color", DEFAULT_COLORS[0])
-        if target in self.color_thresholds:
+        target = raw.get("auto_target_color", "red")
+        if isinstance(target, str) and target:
             self.auto_target_color = target
         self.auto_forward_invert = bool(raw.get("auto_forward_invert", self.auto_forward_invert))
         self.simulation_enabled = bool(raw.get("simulation", self.simulation_enabled))
@@ -606,9 +536,6 @@ class RobotController:
     def continuous(self) -> Tuple[str, ...]:
         return tuple(self.continuous_joints)
 
-    def colors(self) -> Tuple[str, ...]:
-        return tuple(self.color_thresholds.keys())
-
     # ------------------------------------------------------------------ #
     # Mode helpers
     # ------------------------------------------------------------------ #
@@ -621,7 +548,6 @@ class RobotController:
         self.mode = normalized
         LOGGER.info("Kontrol modu %s olarak ayarlandi.", normalized)
         self.stop_all_motion()
-        self.auto_grasped = False
         self._reset_autopilot()
 
     def is_manual(self) -> bool:
@@ -645,8 +571,6 @@ class RobotController:
         if normalized in ("paused", "stopped"):
             self.stop_all_motion()
             self._reset_autopilot()
-        if normalized == "stopped":
-            self.auto_grasped = False
         LOGGER.info("Calisma durumu %s olarak ayarlandi.", normalized)
 
     def is_running(self) -> bool:
@@ -659,18 +583,11 @@ class RobotController:
         self.stop_wheels()
         for joint in self.continuous_joints:
             self.set_continuous_speed(joint, 0)
-        self.gripper_burst_until = 0.0
-        self.gripper_reverse_until = 0.0
-        self._last_auto_calib = 0.0
         self._area_smooth = 0.0
         self._cx_smooth = 0.0
         self._cy_smooth = 0.0
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
-        self._blue_release_cooldown = 0.0
-        self._blue_confirm_hits = 0
-        self._blue_last_seen_time = 0.0
-        self._blue_last_pos = None
         self._target_hold_until = 0.0
         self._target_smooth_color = None
         self._target_raw_pos = None
@@ -719,372 +636,28 @@ class RobotController:
             except Exception:
                 pass
 
-    # ------------------------------------------------------------------ #
-    # Auto threshold helpers
-    # ------------------------------------------------------------------ #
-    def set_auto_threshold_enabled(self, enabled: bool) -> None:
-        self.auto_threshold_enabled = bool(enabled)
-        LOGGER.info("Otomatik esikleme %s.", "acik" if self.auto_threshold_enabled else "kapali")
-
-    def auto_calibrate_from_frame(self, hsv_frame: np.ndarray, low_pct: float = 5.0, _high_pct: float = 95.0) -> None:
-        if hsv_frame.size == 0:
-            LOGGER.warning("Auto calibrate: bos kare.")
-            return
-        sat = hsv_frame[:, :, 1].astype(np.float32).ravel()
-        val = hsv_frame[:, :, 2].astype(np.float32).ravel()
-        # Ortam aydinligina gore (V ortalama / std) min-max belirle
-        sat_min = float(np.percentile(sat, low_pct))
-        val_min = float(np.percentile(val, low_pct))
-
-        sat_min = int(max(0.0, min(255.0, sat_min)))
-        val_min = int(max(0.0, min(255.0, val_min)))
-
-        sat_min = max(40, min(200, sat_min))
-        val_min = max(40, min(200, val_min))
-        for thr in self.color_thresholds.values():
-            thr.sat_min = int(round(0.7 * thr.sat_min + 0.3 * sat_min))
-            thr.val_min = int(round(0.7 * thr.val_min + 0.3 * val_min))
-            if thr.sat_max <= thr.sat_min:
-                thr.sat_max = min(255, thr.sat_min + 10)
-            if thr.val_max <= thr.val_min:
-                thr.val_max = min(255, thr.val_min + 10)
-            thr.clamp()
-        LOGGER.debug(
-            "Auto threshold (ambient) sat_min %s, val_min %s",
-            sat_min,
-            val_min,
-        )
-
-    def set_dominant_colors_hint(self, colors: Optional[Sequence[str]]) -> None:
-        if not colors:
-            self.dominant_colors_hint = tuple()
-            return
-        normalized = [c.strip().lower() for c in colors if c]
-        self.dominant_colors_hint = tuple(normalized)
-
-    # ------------------------------------------------------------------ #
-    # Autopilot (color approach + grasp)
-    # ------------------------------------------------------------------ #
-    def _build_color_mask(
-        self,
-        hsv_frame: np.ndarray,
-        color: str,
-    ) -> Tuple[np.ndarray, Optional[Threshold], list[tuple[int, int]]]:
-        thr = self.color_thresholds.get(color)
-        if thr is None:
-            return np.zeros(hsv_frame.shape[:2], dtype=np.uint8), None, []
-        ranges = [(thr.hue_min, thr.hue_max)]
-        # Hue sarmalaması: kullanici min>max verirse veya kirmizi kenarlara gelirse iki bant oluştur
-        if thr.hue_min > thr.hue_max:
-            ranges = [(thr.hue_min, 179), (0, thr.hue_max)]
-        elif color == "red":
-            if thr.hue_min <= 10:
-                ranges.append((170, 179))
-            elif thr.hue_max >= 170:
-                ranges.append((0, 10))
-
-        mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
-        for h_min, h_max in ranges:
-            lower = np.array([h_min, thr.sat_min, thr.val_min], dtype=np.uint8)
-            upper = np.array([h_max, thr.sat_max, thr.val_max], dtype=np.uint8)
-            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_frame, lower, upper))
-        mask = cv2.GaussianBlur(mask, (5, 5), 0)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        return mask, thr, ranges
-
-    def build_color_mask(self, hsv_frame: np.ndarray, color: str) -> np.ndarray:
-        """Expose color mask for GUI preview without touching autopilot state."""
-        mask, _thr, _ranges = self._build_color_mask(hsv_frame, color)
-        return mask
-
-    def _validate_mask_color(
-        self,
-        hsv_frame: np.ndarray,
-        mask_img: np.ndarray,
-        thr: Threshold,
-        ranges: list[tuple[int, int]],
-        sat_floor: Optional[int] = None,
-        val_floor: Optional[int] = None,
-    ) -> bool:
-        try:
-            masked_pixels = hsv_frame[mask_img > 0]
-            if masked_pixels.size == 0:
-                return False
-            h_med = float(np.median(masked_pixels[:, 0]))
-            s_med = float(np.median(masked_pixels[:, 1]))
-            v_med = float(np.median(masked_pixels[:, 2]))
-            sat_min = max(thr.sat_min, sat_floor) if sat_floor is not None else max(thr.sat_min, 70)
-            val_min = max(thr.val_min, val_floor) if val_floor is not None else max(thr.val_min, 50)
-            hue_diff = None
-            hue_span = None
-            for h_min, h_max in ranges:
-                center = (h_min + h_max) / 2.0
-                span = (h_max - h_min) / 2.0 + 5.0  # hue toleransi
-                diff = min(abs(h_med - center), 180 - abs(h_med - center))
-                if hue_diff is None or diff < hue_diff:
-                    hue_diff = diff
-                    hue_span = span
-            if hue_diff is None or hue_span is None:
-                return False
-            if s_med < sat_min or v_med < val_min or hue_diff > hue_span:
-                return False
-            return True
-        except Exception:
-            return True
-
-    def _mask_target(self, hsv_frame: np.ndarray, color: str) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, float, float, str]]]:
-        """Return mask and largest contour info for given color."""
-
-        def find_contour(mask_img: np.ndarray) -> Optional[Tuple[np.ndarray, Tuple[int, int, int, float, float, str]]]:
-            contours, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not contours:
-                return None
-            largest = max(contours, key=cv2.contourArea)
-            area = cv2.contourArea(largest)
-            # Kucuk hedefler icin limit: en az %0.2 alan veya 300 piksel
-            min_area = max(120.0, mask_img.shape[0] * mask_img.shape[1] * 0.002)
-            if area < min_area:
-                return None
-            mask_ratio = float(cv2.countNonZero(mask_img)) / float(mask_img.shape[0] * mask_img.shape[1])
-            # Maske orani cok dusukse ele (min %0.3)
-            if mask_ratio < 0.003:
-                return None
-            x, y, w, h = cv2.boundingRect(largest)
-            rect_area = max(1.0, float(w * h))
-            solidity = area / rect_area
-            aspect = w / max(1.0, h)
-            peri = cv2.arcLength(largest, True)
-            circularity = 0.0 if peri == 0 else 4.0 * np.pi * (area / (peri * peri))
-            # Balon hedefler için: dolgun (solidity), yuvarlak (aspect ~1, circularity yüksek) olmasını bekle
-            if solidity < 0.20:
-                return None
-            if aspect < 0.35 or aspect > 2.8:
-                return None
-            if circularity < 0.20:
-                return None
-            M = cv2.moments(largest)
-            if M["m00"] == 0:
-                cx = int(x + w / 2)
-                cy = int(y + h / 2)
-            else:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-            depth_norm = 1.0 / max(1.0, min(area, mask_img.shape[0] * mask_img.shape[1]))
-            depth_norm = max(0.0, min(1.0, depth_norm * 1000))
-            return mask_img, (cx, cy, int(area), depth_norm, float(mask_ratio), color)
-
-        mask, thr, ranges = self._build_color_mask(hsv_frame, color)
-        if thr is None:
-            return mask, None
-
-        result = find_contour(mask)
-        if result:
-            mask_img, target = result
-            # Ek renk dogrulama: median hue/sat/val kontrolü, yalanci pozitifleri eleyelim
-            if not self._validate_mask_color(hsv_frame, mask_img, thr, ranges):
-                return mask, None
-            return mask_img, target
-        return mask, None
-
-    def _dense_target(
-        self, hsv_frame: np.ndarray, color: str
-    ) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, float, float, str]], float]:
-        mask, thr, ranges = self._build_color_mask(hsv_frame, color)
-        if thr is None:
-            return mask, None, 0.0
-        frame_area = float(mask.shape[0] * mask.shape[1])
-        min_area = max(80.0, frame_area * 0.0005)
-        if cv2.countNonZero(mask) < min_area:
-            return mask, None, 0.0
-        if not self._validate_mask_color(hsv_frame, mask, thr, ranges, sat_floor=70, val_floor=50):
-            return mask, None, 0.0
-
-        sat = hsv_frame[:, :, 1].astype(np.float32) / 255.0
-        val = hsv_frame[:, :, 2].astype(np.float32) / 255.0
-        weight = (mask.astype(np.float32) / 255.0) * (0.6 * sat + 0.4 * val)
-        min_dim = min(mask.shape[:2])
-        kernel = max(9, int(min_dim * 0.035))
-        if kernel % 2 == 0:
-            kernel += 1
-        density = cv2.blur(weight, (kernel, kernel))
-        _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(density)
-        if max_val < 0.015:
-            return mask, None, 0.0
-
-        num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        label = labels[max_loc[1], max_loc[0]]
-        if label == 0 or label >= num_labels:
-            return mask, None, 0.0
-        area = int(stats[label, cv2.CC_STAT_AREA])
-        if area < min_area:
-            return mask, None, 0.0
-        cx = int(max_loc[0])
-        cy = int(max_loc[1])
-        mask_ratio = area / frame_area
-        depth_norm = 1.0 / max(1.0, min(area, frame_area))
-        depth_norm = max(0.0, min(1.0, depth_norm * 1000))
-        score = float(max_val) + min(0.3, mask_ratio * 3.0)
-        return mask, (cx, cy, area, depth_norm, float(mask_ratio), color), score
-
-    def _aim_arm(self, target: Tuple[int, int, int, float, float, str], frame_size: Tuple[int, int]) -> None:
-        """
-        Move single positional joint toward target (horizontal pan); continuous gripper is not auto-driven here.
-        """
-        if "joint" not in self.arm_state:
-            return
-        cx = int(target[0])
-        width, _height = frame_size
-        center_x = width // 2
-        error_x = cx - center_x
-        norm_error = max(-1.0, min(1.0, error_x / (width / 2)))
-
-        joint_target = 90 + norm_error * 60  # ±60 deg
-        self.set_joint_angle("joint", joint_target)
-
-    def _find_best_target(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> Optional[Tuple]:
-        """Find the best target in the frame by iterating through allowed colors."""
-        # Yalnızca sari ve kirmizi takip edilebilir; hedef en yoğun bolgeye gore secilir.
-        allowed_colors = ("red", "yellow")
-        best_target = None
-        best_score = -1.0
-        prev_target = self.last_target
-        prev_color = self.last_target_color if self.last_target_color in allowed_colors else None
-        prev_cx = prev_target[0] if prev_target else None
-        prev_cy = prev_target[1] if prev_target else None
-        max_dist = max(1.0, min(frame_size) * 0.25)
-
-        for color in allowed_colors:
-            _mask, candidate, score = self._dense_target(hsv_frame, color)
-            if candidate is None:
-                continue
-            if prev_color == color and prev_cx is not None and prev_cy is not None:
-                cx, cy = candidate[0], candidate[1]
-                dist = float(np.hypot(cx - prev_cx, cy - prev_cy))
-                if dist <= max_dist:
-                    score += 0.1 * (1.0 - dist / max_dist)
-            if score > best_score:
-                best_score = score
-                best_target = candidate
-
-        return best_target
-
     def _reset_autopilot(self) -> None:
         self.autopilot_state = AutopilotState.IDLE
         self.auto_state_started_at = 0.0
         self.auto_scan_step = 0
         self.last_target = None
         self.last_target_color = None
-        self.gripper_burst_until = 0.0
-        self.gripper_reverse_until = 0.0
-        self._last_auto_calib = 0.0
         self._area_smooth = 0.0
         self._cx_smooth = 0.0
         self._cy_smooth = 0.0
         self._drive_turn_smooth = 0.0
         self._drive_fwd_smooth = 0.0
-        self._blue_release_cooldown = 0.0
-        self._blue_confirm_hits = 0
-        self._blue_last_seen_time = 0.0
-        self._blue_last_pos = None
         self._target_hold_until = 0.0
         self._target_smooth_color = None
         self._target_raw_pos = None
         self._target_raw_color = None
 
-    def _trigger_blue_release(self, now: float) -> bool:
-        """Open gripper when blue balloon is seen."""
-        if now < self._blue_release_cooldown:
-            return False
-        self.stop_all_motion()
-        try:
-            self.set_continuous_speed("gripper", -30.0)
-        except Exception:
-            pass
-        self.gripper_reverse_until = now + 3.0
-        self._blue_release_cooldown = now + 6.0
-        self._blue_confirm_hits = 0
-        self._blue_last_seen_time = 0.0
-        self._blue_last_pos = None
-        LOGGER.info("Auto: Blue balloon detected, releasing grip.")
-        return True
-
-    def _confirm_blue_candidate(
-        self,
-        hsv_frame: np.ndarray,
-        mask: np.ndarray,
-        candidate: Optional[Tuple[int, int, int, float, float, str]],
-        frame_size: Tuple[int, int],
-        now: float,
-    ) -> bool:
-        if candidate is None:
-            self._blue_confirm_hits = 0
-            self._blue_last_seen_time = 0.0
-            self._blue_last_pos = None
-            return False
-
-        cx, cy, area, _depth, mask_ratio, _color = candidate
-        frame_area = max(1.0, float(frame_size[0] * frame_size[1]))
-        area_norm = area / frame_area
-        if area_norm < 0.004 or area_norm > 0.60 or mask_ratio < 0.004 or mask_ratio > 0.35:
-            self._blue_confirm_hits = 0
-            self._blue_last_seen_time = 0.0
-            self._blue_last_pos = None
-            return False
-
-        masked_pixels = hsv_frame[mask > 0]
-        if masked_pixels.size == 0:
-            self._blue_confirm_hits = 0
-            self._blue_last_seen_time = 0.0
-            self._blue_last_pos = None
-            return False
-
-        hue = masked_pixels[:, 0].astype(np.int16)
-        sat = masked_pixels[:, 1].astype(np.int16)
-        val = masked_pixels[:, 2].astype(np.int16)
-        h_med = float(np.median(hue))
-        s_med = float(np.median(sat))
-        v_med = float(np.median(val))
-        hue_diff = np.minimum(np.abs(hue - h_med), 180 - np.abs(hue - h_med))
-        hue_spread = float(np.percentile(hue_diff, 80))
-
-        thr = self.color_thresholds.get("blue")
-        sat_floor = max(thr.sat_min if thr else 0, 90)
-        val_floor = max(thr.val_min if thr else 0, 60)
-        if s_med < sat_floor or v_med < val_floor or hue_spread > 18.0:
-            self._blue_confirm_hits = 0
-            self._blue_last_seen_time = 0.0
-            self._blue_last_pos = None
-            return False
-
-        if self._blue_last_pos and now - self._blue_last_seen_time <= 0.7:
-            last_x, last_y = self._blue_last_pos
-            max_jump = max(20, int(min(frame_size) * 0.08))
-            dist = float(np.hypot(cx - last_x, cy - last_y))
-            if dist <= max_jump:
-                self._blue_confirm_hits += 1
-            else:
-                self._blue_confirm_hits = 1
-        else:
-            self._blue_confirm_hits = 1
-
-        self._blue_last_seen_time = now
-        self._blue_last_pos = (cx, cy)
-        return self._blue_confirm_hits >= 2
-
     def autopilot_step(
         self,
-        hsv_frame: Optional[np.ndarray],
+        target: Optional[Tuple[int, int, int, float, float, str]],
         frame_size: Tuple[int, int],
-        target: Optional[Tuple[int, int, int, float, float, str]] = None,
-        use_external_target: bool = False,
     ) -> None:
-        """
-        Main autopilot state machine.
-        If target is provided, uses it instead of HSV color tracking.
-        Set use_external_target=True to skip HSV-based detection entirely.
-        """
+        """Main autopilot state machine using only external (YOLO) targets."""
         if self.is_manual() or not self.is_running():
             if self.autopilot_state != AutopilotState.IDLE:
                 self._reset_autopilot()
@@ -1094,36 +667,7 @@ class RobotController:
             return
 
         now = time.monotonic()
-        if self.gripper_reverse_until and now >= self.gripper_reverse_until:
-            self.gripper_reverse_until = 0.0
-            try:
-                self.set_continuous_speed("gripper", 0.0)
-            except Exception:
-                pass
-        if self.gripper_burst_until and now >= self.gripper_burst_until:
-            self.gripper_burst_until = 0.0
-            try:
-                self.set_continuous_speed("gripper", 0.0)
-            except Exception:
-                pass
-
-        if use_external_target:
-            best_target = target
-            blue_confirmed = False
-        else:
-            if hsv_frame is None or hsv_frame.size == 0:
-                LOGGER.debug("Auto: empty frame, skipping step.")
-                return
-            hsv_proc = cv2.GaussianBlur(hsv_frame, (3, 3), 0)
-            # Periodic auto-calibration
-            if self.auto_threshold_enabled and now - self._last_auto_calib >= 5.0:
-                self.auto_calibrate_from_frame(hsv_frame)
-                self._last_auto_calib = now
-                LOGGER.debug("Auto: periodic color calibration applied.")
-
-            best_target = target if target is not None else self._find_best_target(hsv_proc, frame_size)
-            blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
-            blue_confirmed = self._confirm_blue_candidate(hsv_proc, blue_mask, blue_candidate, frame_size, now)
+        best_target = target
         if best_target:
             cx, cy, area, depth_norm, mask_ratio, color = best_target
             self._target_raw_pos = (cx, cy)
@@ -1163,8 +707,6 @@ class RobotController:
 
         if state == AutopilotState.IDLE:
             self.stop_all_motion()
-            if blue_confirmed and self._trigger_blue_release(now):
-                return
             if best_target:
                 LOGGER.info("Auto: Target found while idle, switching to TRACKING.")
                 self.autopilot_state = AutopilotState.TRACKING
@@ -1177,33 +719,26 @@ class RobotController:
 
         if state == AutopilotState.SCANNING:
             cfg = self.autopilot_config
-            if blue_confirmed and self._trigger_blue_release(now):
-                return
             if self.auto_scan_step == 0 and now - self.auto_state_started_at < cfg["scan_initial_wait"]:
-                # Initial wait before starting the scan
                 self.stop_all_motion()
                 return
 
             if best_target:
                 LOGGER.info("Auto: Target found during scan, switching to TRACKING.")
                 self.stop_all_motion()
-                self._reset_autopilot() # Reset timers and smoothers
+                self._reset_autopilot()
                 self.autopilot_state = AutopilotState.TRACKING
                 return
 
             time_in_state = now - self.auto_state_started_at
-            
-            # Rotate -> Hold cycle
             if time_in_state < cfg["scan_rotate_duration"]:
                 self._set_drive(turn=cfg["scan_turn_speed"], forward=0.0)
             elif time_in_state < cfg["scan_rotate_duration"] + cfg["scan_hold_duration"]:
                 self.stop_wheels()
             else:
-                # End of hold, start next step
                 self.auto_scan_step += 1
                 self.auto_state_started_at = now
                 if self.auto_scan_step >= cfg["scan_steps"]:
-                    # Devamli tarama: adimi sifirla, donusleri surdur
                     self.auto_scan_step = 0
                     LOGGER.info("Auto: Scan loop restarting (continuous).")
                 else:
@@ -1217,13 +752,9 @@ class RobotController:
                 self._tracking_zone = 0
                 self.stop_all_motion()
                 return
-            if blue_confirmed and self._trigger_blue_release(now):
-                self.autopilot_state = AutopilotState.IDLE
-                return
 
-            cx, cy, area, depth_norm, mask_ratio, color = best_target
+            cx, _cy, area, _depth_norm, mask_ratio, color = best_target
 
-            # --- Motion control ---
             cfg = self.autopilot_config
             frame_area = frame_size[0] * frame_size[1]
             if frame_area <= 0:
@@ -1237,17 +768,9 @@ class RobotController:
                 self._area_smooth = 0.7 * self._area_smooth + 0.3 * ratio_value
             ratio_for_ctrl = self._area_smooth
 
-            if self.gripper_burst_until and now < self.gripper_burst_until:
-                self.stop_wheels()
-                return
-            if self.auto_grasped:
-                self.stop_wheels()
-                return
-
             raw_cx = cx
             if self._target_raw_pos is not None:
-                if self._target_raw_color is None or self._target_raw_color == color:
-                    raw_cx = self._target_raw_pos[0]
+                raw_cx = self._target_raw_pos[0]
             width = frame_size[0]
             if width <= 0:
                 self.stop_wheels()
@@ -1307,20 +830,6 @@ class RobotController:
                 self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
                 return
 
-            if not use_external_target:
-                dominant_list = list(self.dominant_colors_hint)
-                dominant_rank = dominant_list.index(color) if color in dominant_list else None
-                if dominant_rank == 1 and not self.auto_grasped:
-                    self.stop_wheels()
-                    try:
-                        self.set_continuous_speed("gripper", 25.0)
-                    except Exception:
-                        pass
-                    self.gripper_burst_until = now + 3.0
-                    self.auto_grasped = True
-                    LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
-                    return
-
             if fwd_cmd > 0.0:
                 fwd_cmd = max(4.0, fwd_cmd)
             if self.auto_forward_invert:
@@ -1337,9 +846,7 @@ class RobotController:
             self.autopilot_state = AutopilotState.TRACKING
             return
 
-
         if state == AutopilotState.SEARCH_FAILED:
-            # Do nothing, wait for a reset
             self.stop_all_motion()
             return
 
@@ -1351,16 +858,6 @@ class RobotController:
         for wheel in self.wheels():
             val = left if "left" in wheel else right
             self.set_wheel_speed(wheel, val)
-
-    def _execute_grasp(self) -> None:
-        LOGGER.info("Grasp sequence triggered.")
-        # simple preset: stop, close gripper
-        self.stop_all_motion()
-        # Sadece mevcut eklemleri kullanarak basit bir kapama profili
-        if "joint" in self.arm_state:
-            self.set_joint_angle("joint", 60)
-        if "gripper" in self.arm_state:
-            self.set_continuous_speed("gripper", -40.0)  # kapama yonu (ayarlanabilir)
 
     # ------------------------------------------------------------------ #
     # Metrics helpers
@@ -1377,8 +874,6 @@ class RobotController:
             "simulation": self.simulation_enabled,
             "run_state": self.run_state,
             "auto_target_color": self.auto_target_color,
-            "auto_threshold": self.auto_threshold_enabled,
-            "auto_grasped": self.auto_grasped,
             "supply_voltage": self.supply_voltage,
             "supply_current": self.supply_current,
             "power_w": self.power_consumption_w,
