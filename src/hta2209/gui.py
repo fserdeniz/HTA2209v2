@@ -616,27 +616,30 @@ class HTAControlGUI:
             }
             payload = {}
             try:
-                available = getattr(self.picam, "camera_controls", {}) or {}
+                available = getattr(self.picam, "camera_controls", None)
             except Exception:
-                available = {}
+                available = None
+            if not isinstance(available, dict) or not available:
+                return
             for key, name in control_map.items():
                 if key not in controls:
                     continue
-                if available and name not in available:
+                if name not in available:
                     continue
                 value = controls.get(key)
                 if value is None:
                     continue
-                ctrl_info = available.get(name) if isinstance(available, dict) else None
-                if ctrl_info is not None:
-                    try:
-                        min_val = float(ctrl_info.min)
-                        max_val = float(ctrl_info.max)
-                        value = float(value)
-                        if value < min_val or value > max_val:
-                            value = min_val + (max_val - min_val) * (value / 255.0)
-                    except Exception:
-                        pass
+                ctrl_info = available.get(name)
+                if ctrl_info is None:
+                    continue
+                try:
+                    min_val = float(ctrl_info.min)
+                    max_val = float(ctrl_info.max)
+                    value = float(value)
+                    value = min_val + (max_val - min_val) * (value / 255.0)
+                    value = max(min_val, min(max_val, value))
+                except Exception:
+                    continue
                 payload[name] = value
             if payload:
                 try:
@@ -1492,6 +1495,7 @@ def main() -> None:
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
     controller = RobotController(config_path=args.config)
+    controller.set_mode("manual")
     app = HTAControlGUI(controller)
     app.run()
 
