@@ -502,17 +502,19 @@ class RobotController:
             "scan_hold_duration": 3.0,
             "scan_steps": 9999,            # surekli tarama
             "scan_turn_speed": 30.0,
-            "approach_area_threshold": 0.01,
-            "stop_area_threshold": 0.01,
-            "target_area_ratio": 0.01,
+            "approach_area_threshold": 0.35,
+            "stop_area_threshold": 0.35,
+            "target_area_ratio": 0.35,
             "area_tolerance_ratio": 0.0,
             "tracking_turn_speed_max": 10.0,
             "tracking_forward_speed_max": 15.0,
             "target_speed_scale": 0.02,
+            "target_turn_scale": 0.01,
             "align_center_tol_ratio": 0.08,
             "turn_kp": 1.0,
             "turn_kd": 0.3,
             "turn_smooth_alpha": 0.6,
+            "close_stop_ratio": 0.6,
             "step_move_sec": 0.4,
             "step_pause_sec": 0.35,
         }
@@ -775,12 +777,29 @@ class RobotController:
                 self.stop_all_motion()
                 return
 
-            cx, _cy, _area, _depth_norm, _mask_ratio, color = best_target
+            cx, _cy, area, _depth_norm, mask_ratio, color = best_target
             width = frame_size[0]
             if width <= 0:
                 self.stop_wheels()
                 return
             center_x = width / 2.0
+            height = frame_size[1]
+            frame_area = float(width * height)
+            if frame_area > 0:
+                normalized_area = area / frame_area
+                ratio_value = mask_ratio if mask_ratio is not None else normalized_area
+                if self._area_smooth == 0.0:
+                    self._area_smooth = ratio_value
+                else:
+                    if ratio_value > self._area_smooth:
+                        self._area_smooth = 0.4 * self._area_smooth + 0.6 * ratio_value
+                    else:
+                        self._area_smooth = 0.7 * self._area_smooth + 0.3 * ratio_value
+                ratio_for_ctrl = self._area_smooth
+                close_stop = float(cfg.get("close_stop_ratio", 0.0))
+                if close_stop > 0.0 and ratio_for_ctrl >= close_stop:
+                    self.stop_wheels()
+                    return
             raw_cx = cx
             if self._target_raw_pos is not None:
                 raw_cx = self._target_raw_pos[0]
@@ -810,7 +829,8 @@ class RobotController:
             control = kp * error_norm + kd * deriv
             control = max(-1.0, min(1.0, control))
             speed_scale = max(0.0, float(cfg.get("target_speed_scale", 1.0)))
-            turn_cmd = control * cfg["tracking_turn_speed_max"] * speed_scale
+            turn_scale = max(0.0, float(cfg.get("target_turn_scale", speed_scale)))
+            turn_cmd = control * cfg["tracking_turn_speed_max"] * turn_scale
             smooth_alpha = float(cfg.get("turn_smooth_alpha", 0.6))
             self._drive_turn_smooth = smooth_alpha * self._drive_turn_smooth + (1.0 - smooth_alpha) * turn_cmd
             self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
@@ -867,6 +887,13 @@ class RobotController:
                 min_area = cfg["approach_area_threshold"]
 
             if ratio_for_ctrl >= min_area:
+                self._step_phase = "idle"
+                self._step_direction = 0
+                self.stop_wheels()
+                return
+
+            close_stop = float(cfg.get("close_stop_ratio", 0.0))
+            if close_stop > 0.0 and ratio_for_ctrl >= close_stop:
                 self._step_phase = "idle"
                 self._step_direction = 0
                 self.stop_wheels()
