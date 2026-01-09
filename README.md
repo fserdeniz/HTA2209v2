@@ -1,18 +1,19 @@
 # RPi Renk Tabanli Mobil Manipulator
 
-Bu depo, Raspberry Pi 4B (8 GB) uzerinde calisan, renkleri algilayarak hedef nesnelere yaklasan ve PCA9685 PWM surucu karti uzerinden hem mobil platformu hem de robotik kolu yoneten sistem icin baslangic altyapisini sunar.
+Bu depo, Raspberry Pi 4B (8 GB) uzerinde calisan, YOLOv8 ile hedef nesneleri algilayip yaklasan ve PCA9685 PWM surucu karti uzerinden hem mobil platformu hem de robotik kolu yoneten sistem icin baslangic altyapisini sunar.
 
 ## Donanim Hedefi
 - Raspberry Pi 4B 8 GB
 - PCA9685 tabanli PWM motor/servo surucu
 - 4 tekerlekli diferansiyel surus tabani
 - Servo tabanli robotik kol
-- CSI veya USB kamera (renk algilama icin)
+- CSI veya USB kamera (gorsel algilama icin)
 
 ## Yazilim Bilesenleri
 - `src/hta2209/controller.py`: PCA9685 kanallarini soyutlayan, tekerlek hizlari, eklem acilari ve HSV esiklerini saklayip kaydeden denetleyici. Donanim bagli degilse otomatik olarak simulasyon moduna gecer.
 - `src/hta2209/gui.py`: Tkinter ile yazilmis GUI; renk esikleri, surus ve kol kontrolu, Manual/Auto mod secimi ve OpenCV + Pillow kullanarak kamera onizlemesi sunar.
-- `requirements.txt`: OpenCV, NumPy, Adafruit suruculeri ve Pillow dahil gerekli Python paketleri.
+- `src/hta2209/detector.py`: YOLOv8 modeliyle hedef tespiti ve kamera onizlemesi icin basit AI (kenar/renk) analizleri.
+- `requirements.txt`: OpenCV, NumPy, Ultralytics (YOLOv8), Adafruit suruculeri ve Pillow dahil gerekli Python paketleri.
 
 ## Kurulum
 1. **Depoyu klonlayin**
@@ -63,13 +64,18 @@ python -m hta2209.gui --config config/settings.json --log-level INFO
   - **Renk Esikleri**: HSV bandlarini (H min/max, S min/max, V min/max) ayarlayin. Maske onizleme ile secilen renge gore maske + kontur overlay gorulebilir.
   - **Surus Kontrol**: Her tekerlek icin -100/+100 arasi hiz; "Tekerlekleri Durdur" tum throttle'i sifirlar.
   - **Robot Kol**: Baz, omuz, dirsek, bilek ve gripper servo acilarini 0-180 derece arasinda degistirin.
-  - **Grafikler**: Mod, simülasyon durumu, hedef renk ve ek metrikleri (PWM, volt/akim/guc) gosterir. Auto hedef renkleri listesine kirmizi/yesil/mavi'ye ek olarak sari, turuncu, mor, camgöbeği dahildir.
+  - **Grafikler**: Mod, simülasyon durumu, hedef sinif ve ek metrikleri (PWM, volt/akim/guc) gosterir.
 
 GUI ust kismindaki "Kaydet" mevcut durumu `config/settings.json` dosyasina yazar; "Yeniden Yukle" ayni dosyadan geri alir. Dosya yoksa otomatik olusturulur.
 
 ## Kontrol Modlari ve Kisayollar
 - **Manual**: Tum slider'lar aktif, klavye kontrolu acik.
-- **Auto**: Manuel girdiler kilitlenir; otonom algoritmalarinizi calistirmak icin kullanin.
+- **Auto**: Manuel girdiler kilitlenir; YOLOv8 modeli (`hta2209.pt`) tek sinif ("red") tespitiyle kutu merkezini takip eder, yaklasma/durma mantigini uygular.
+
+## YOLOv8 Modeli (Auto)
+- Model dosyasi: `hta2209.pt` (depo kok dizininde)
+- Sinif: `red`
+- Calisma: CPU uzerinde calisir; model yuklenemezse log paneline hata yazilir ve HSV tabanli eski takip devreye girer.
 
 Klavye (Manual mod):
 - Yon tuslari: Ileri/geri hiz ve donus bilesenlerini +/-10 degistirir (`Space` = acil durdur).

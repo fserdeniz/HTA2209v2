@@ -1073,9 +1073,17 @@ class RobotController:
         self._blue_last_pos = (cx, cy)
         return self._blue_confirm_hits >= 2
 
-    def autopilot_step(self, hsv_frame: np.ndarray, frame_size: Tuple[int, int]) -> None:
+    def autopilot_step(
+        self,
+        hsv_frame: Optional[np.ndarray],
+        frame_size: Tuple[int, int],
+        target: Optional[Tuple[int, int, int, float, float, str]] = None,
+        use_external_target: bool = False,
+    ) -> None:
         """
         Main autopilot state machine.
+        If target is provided, uses it instead of HSV color tracking.
+        Set use_external_target=True to skip HSV-based detection entirely.
         """
         if self.is_manual() or not self.is_running():
             if self.autopilot_state != AutopilotState.IDLE:
@@ -1099,21 +1107,23 @@ class RobotController:
             except Exception:
                 pass
 
-        # Frame pre-processing
-        if hsv_frame is None or hsv_frame.size == 0:
-            LOGGER.debug("Auto: empty frame, skipping step.")
-            return
-        hsv_proc = cv2.GaussianBlur(hsv_frame, (3, 3), 0)
+        if use_external_target:
+            best_target = target
+            blue_confirmed = False
+        else:
+            if hsv_frame is None or hsv_frame.size == 0:
+                LOGGER.debug("Auto: empty frame, skipping step.")
+                return
+            hsv_proc = cv2.GaussianBlur(hsv_frame, (3, 3), 0)
+            # Periodic auto-calibration
+            if self.auto_threshold_enabled and now - self._last_auto_calib >= 5.0:
+                self.auto_calibrate_from_frame(hsv_frame)
+                self._last_auto_calib = now
+                LOGGER.debug("Auto: periodic color calibration applied.")
 
-        # Periodic auto-calibration
-        if self.auto_threshold_enabled and now - self._last_auto_calib >= 5.0:
-            self.auto_calibrate_from_frame(hsv_frame)
-            self._last_auto_calib = now
-            LOGGER.debug("Auto: periodic color calibration applied.")
-
-        best_target = self._find_best_target(hsv_proc, frame_size)
-        blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
-        blue_confirmed = self._confirm_blue_candidate(hsv_proc, blue_mask, blue_candidate, frame_size, now)
+            best_target = target if target is not None else self._find_best_target(hsv_proc, frame_size)
+            blue_mask, blue_candidate = self._mask_target(hsv_proc, "blue")
+            blue_confirmed = self._confirm_blue_candidate(hsv_proc, blue_mask, blue_candidate, frame_size, now)
         if best_target:
             cx, cy, area, depth_norm, mask_ratio, color = best_target
             self._target_raw_pos = (cx, cy)
@@ -1297,18 +1307,19 @@ class RobotController:
                 self._set_drive(turn=self._drive_turn_smooth, forward=self._drive_fwd_smooth)
                 return
 
-            dominant_list = list(self.dominant_colors_hint)
-            dominant_rank = dominant_list.index(color) if color in dominant_list else None
-            if dominant_rank == 1 and not self.auto_grasped:
-                self.stop_wheels()
-                try:
-                    self.set_continuous_speed("gripper", 25.0)
-                except Exception:
-                    pass
-                self.gripper_burst_until = now + 3.0
-                self.auto_grasped = True
-                LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
-                return
+            if not use_external_target:
+                dominant_list = list(self.dominant_colors_hint)
+                dominant_rank = dominant_list.index(color) if color in dominant_list else None
+                if dominant_rank == 1 and not self.auto_grasped:
+                    self.stop_wheels()
+                    try:
+                        self.set_continuous_speed("gripper", 25.0)
+                    except Exception:
+                        pass
+                    self.gripper_burst_until = now + 3.0
+                    self.auto_grasped = True
+                    LOGGER.info("Auto: Target is 2nd dominant, running gripper at 25%% for 3s.")
+                    return
 
             if fwd_cmd > 0.0:
                 fwd_cmd = max(4.0, fwd_cmd)

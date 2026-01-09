@@ -8,6 +8,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from tkinter import scrolledtext
@@ -122,6 +123,16 @@ class HTAControlGUI:
         self.auto_threshold_var = tk.BooleanVar(value=False)
         self.test_output: scrolledtext.ScrolledText | None = None
         self.repo_root = Path(__file__).resolve().parents[2]
+        self.yolo_detector = detector.YoloDetector(self.repo_root / "hta2209.pt")
+        self.yolo_target_class = "red"
+        self._yolo_last_detections: list[dict] = []
+        self._yolo_last_target = None
+        self._yolo_last_error = None
+        self._yolo_last_infer = 0.0
+        self._yolo_interval_s = 0.25
+        self._yolo_disabled = False
+        self.controller.auto_target_color = self.yolo_target_class
+        self.target_color_var.set(self.yolo_target_class)
 
         self._create_widgets()
         self.refresh_from_controller()
@@ -525,7 +536,7 @@ class HTAControlGUI:
             ("Mod", "mode"),
             ("Simulasyon", "simulation"),
             ("Calisma", "run_state"),
-            ("Auto hedef rengi", "auto_target_color"),
+            ("Auto hedef sinif", "auto_target_color"),
             ("Otomatik esikleme", "auto_threshold"),
             ("Auto kavrama", "auto_grasped"),
             ("Kaynak Voltaji (V)", "supply_voltage"),
@@ -769,6 +780,62 @@ class HTAControlGUI:
                 cv2.circle(preview, (cx, cy), 5, (255, 0, 0), -1)
         return preview
 
+    def _run_yolo_detection(self, frame_rgb):
+        if self._yolo_disabled:
+            return [], None
+        if frame_rgb is None or frame_rgb.size == 0:
+            return [], None
+        now = time.monotonic()
+        if now - self._yolo_last_infer < self._yolo_interval_s:
+            return self._yolo_last_detections, self._yolo_last_target
+
+        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+        detections = self.yolo_detector.detect(frame_bgr, class_name=self.yolo_target_class)
+        self._yolo_last_infer = now
+        err = self.yolo_detector.last_error
+        if err:
+            if err != self._yolo_last_error:
+                self._append_log(f"YOLO: {err}")
+                self._yolo_last_error = err
+            fatal_markers = ("not available", "not found", "load failed")
+            if any(marker in err for marker in fatal_markers):
+                self._yolo_disabled = True
+            self._yolo_last_detections = []
+            self._yolo_last_target = None
+            return [], None
+
+        self._yolo_last_error = None
+        self._yolo_last_detections = detections
+        self._yolo_last_target = detector.yolo_best_target(
+            detections,
+            frame_rgb.shape[:2],
+            self.yolo_target_class,
+        )
+        return self._yolo_last_detections, self._yolo_last_target
+
+    def _draw_yolo_detections(self, frame_rgb, detections):
+        if frame_rgb is None or frame_rgb.size == 0 or not detections:
+            return frame_rgb
+        overlay = frame_rgb.copy()
+        for det in detections:
+            coords = det.get("xyxy")
+            if not isinstance(coords, (list, tuple)) or len(coords) != 4:
+                continue
+            x1, y1, x2, y2 = [int(round(v)) for v in coords]
+            color = (255, 0, 0)
+            label = f"{det.get('class_name', '')} {float(det.get('conf', 0.0)):.2f}"
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(
+                overlay,
+                label.strip(),
+                (x1, max(15, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2,
+            )
+        return overlay
+
     def _update_camera_frame(self) -> None:
         if not self.camera_running:
             return
@@ -831,8 +898,19 @@ class HTAControlGUI:
             display_frame = self._apply_mask_preview(display_frame)
 
         if not self.controller.is_manual():
-            hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
-            self.controller.autopilot_step(hsv, (display_frame.shape[1], display_frame.shape[0]))
+            yolo_detections, yolo_target = self._run_yolo_detection(self._last_frame)
+            use_external_target = not self._yolo_disabled
+            if yolo_detections:
+                display_frame = self._draw_yolo_detections(display_frame, yolo_detections)
+            hsv = None
+            if not use_external_target:
+                hsv = cv2.cvtColor(self._last_frame, cv2.COLOR_RGB2HSV)
+            self.controller.autopilot_step(
+                hsv,
+                (display_frame.shape[1], display_frame.shape[0]),
+                target=yolo_target,
+                use_external_target=use_external_target,
+            )
             if self.controller.last_target:
                 lt = self.controller.last_target
                 cx, cy, area = lt[0], lt[1], lt[2]
@@ -1016,10 +1094,10 @@ class HTAControlGUI:
 
         color_frame = ttk.Frame(settings)
         color_frame.pack(fill=tk.X, pady=(5, 5))
-        ttk.Label(color_frame, text="Auto hedef rengi (kilitli: sari/kirmizi):").pack(side=tk.LEFT)
+        ttk.Label(color_frame, text="Auto hedef sinif (YOLO: red):").pack(side=tk.LEFT)
         color_combo = ttk.Combobox(
             color_frame,
-            values=list(self.controller.colors()),
+            values=[self.yolo_target_class],
             textvariable=self.target_color_var,
             state="disabled",
             width=10,

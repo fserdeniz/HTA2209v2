@@ -20,6 +20,7 @@ MODULES = [
     "numpy",
     "adafruit_servokit",  # may warn on unsupported platforms
     "dotenv",
+    "ultralytics",
 ]
 
 
