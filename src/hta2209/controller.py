@@ -505,6 +505,7 @@ class RobotController:
             "stop_area_threshold": 0.15,
             "tracking_turn_speed_max": 10.0,
             "tracking_forward_speed_max": 15.0,
+            "target_speed_scale": 0.1,
             "align_center_tol_ratio": 0.08,
             "step_move_sec": 0.4,
             "step_pause_sec": 0.35,
@@ -787,7 +788,8 @@ class RobotController:
                 return
 
             error_norm = min(1.0, abs(error) / max(1.0, center_x))
-            turn_cmd = error_norm * cfg["tracking_turn_speed_max"]
+            speed_scale = max(0.0, float(cfg.get("target_speed_scale", 1.0)))
+            turn_cmd = error_norm * cfg["tracking_turn_speed_max"] * speed_scale
             if error < 0:
                 turn_cmd = -turn_cmd
             self._set_drive(turn=turn_cmd, forward=0.0)
@@ -850,8 +852,11 @@ class RobotController:
 
             step_move = max(0.05, float(cfg.get("step_move_sec", 0.4)))
             step_pause = max(0.0, float(cfg.get("step_pause_sec", 0.35)))
-            forward_speed = float(cfg["tracking_forward_speed_max"])
-            reverse_speed = float(cfg.get("tracking_reverse_speed", forward_speed * 0.6))
+            speed_scale = max(0.0, float(cfg.get("target_speed_scale", 1.0)))
+            base_forward = float(cfg["tracking_forward_speed_max"])
+            base_reverse = float(cfg.get("tracking_reverse_speed", base_forward * 0.6))
+            forward_speed = base_forward * speed_scale
+            reverse_speed = base_reverse * speed_scale
 
             if self._step_phase == "idle":
                 self._step_phase = "move"
