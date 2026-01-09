@@ -156,6 +156,10 @@ class RobotController:
         self._step_direction: int = 0
         self._turn_error_prev: float = 0.0
         self._align_hold_started: float = 0.0
+        self._turn_phase: str = "idle"
+        self._turn_until: float = 0.0
+        self._turn_direction: int = 0
+        self._detect_hold_until: float = 0.0
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -513,9 +517,12 @@ class RobotController:
             "target_turn_scale": 0.01,
             "align_center_tol_ratio": 0.08,
             "align_hold_sec": 0.3,
+            "detect_hold_sec": 0.2,
             "turn_kp": 1.0,
             "turn_kd": 0.3,
             "turn_smooth_alpha": 0.6,
+            "turn_step_sec": 0.2,
+            "turn_pause_sec": 0.2,
             "close_stop_ratio": 0.6,
             "step_move_sec": 0.4,
             "step_pause_sec": 0.35,
@@ -614,6 +621,10 @@ class RobotController:
         self._step_direction = 0
         self._turn_error_prev = 0.0
         self._align_hold_started = 0.0
+        self._turn_phase = "idle"
+        self._turn_until = 0.0
+        self._turn_direction = 0
+        self._detect_hold_until = 0.0
         self._tracking_zone = 0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
@@ -739,6 +750,8 @@ class RobotController:
             if best_target:
                 LOGGER.info("Auto: Initial wait done, target found -> TRACKING.")
                 self.autopilot_state = AutopilotState.TRACKING
+                hold = max(0.0, float(cfg.get("detect_hold_sec", 0.0)))
+                self._detect_hold_until = now + hold if hold > 0.0 else 0.0
             else:
                 LOGGER.info("Auto: Initial wait done, target yok -> SCANNING.")
                 self.autopilot_state = AutopilotState.SCANNING
@@ -752,6 +765,8 @@ class RobotController:
                 self.auto_state_started_at = now
                 self._step_phase = "idle"
                 self._step_direction = 0
+                hold = max(0.0, float(cfg.get("detect_hold_sec", 0.0)))
+                self._detect_hold_until = now + hold if hold > 0.0 else 0.0
                 self.stop_wheels()
                 return
 
@@ -778,8 +793,16 @@ class RobotController:
                 self._turn_error_prev = 0.0
                 self._drive_turn_smooth = 0.0
                 self._align_hold_started = 0.0
+                self._turn_phase = "idle"
+                self._turn_direction = 0
+                self._detect_hold_until = 0.0
                 self.stop_all_motion()
                 return
+
+            if self._detect_hold_until and now < self._detect_hold_until:
+                self.stop_wheels()
+                return
+            self._detect_hold_until = 0.0
 
             cx, _cy, area, _depth_norm, mask_ratio, color = best_target
             width = frame_size[0]
@@ -821,11 +844,15 @@ class RobotController:
                     if now - self._align_hold_started < align_hold:
                         self._turn_error_prev = 0.0
                         self._drive_turn_smooth = 0.0
+                        self._turn_phase = "idle"
+                        self._turn_direction = 0
                         self.stop_wheels()
                         return
                 self._align_hold_started = 0.0
                 self._turn_error_prev = 0.0
                 self._drive_turn_smooth = 0.0
+                self._turn_phase = "idle"
+                self._turn_direction = 0
                 self.stop_wheels()
                 self.autopilot_state = AutopilotState.APPROACHING
                 self.auto_state_started_at = now
@@ -837,6 +864,10 @@ class RobotController:
 
             error_norm = error / max(1.0, center_x)
             error_norm = max(-1.0, min(1.0, error_norm))
+            turn_dir = 1 if error_norm > 0 else -1
+            if turn_dir != self._turn_direction:
+                self._turn_phase = "idle"
+                self._turn_direction = turn_dir
             deriv = error_norm - self._turn_error_prev
             self._turn_error_prev = error_norm
             kp = float(cfg.get("turn_kp", 1.0))
@@ -848,6 +879,22 @@ class RobotController:
             turn_cmd = control * cfg["tracking_turn_speed_max"] * turn_scale
             smooth_alpha = float(cfg.get("turn_smooth_alpha", 0.6))
             self._drive_turn_smooth = smooth_alpha * self._drive_turn_smooth + (1.0 - smooth_alpha) * turn_cmd
+            step_turn = max(0.0, float(cfg.get("turn_step_sec", 0.0)))
+            step_pause = max(0.0, float(cfg.get("turn_pause_sec", 0.0)))
+            if step_turn > 0.0:
+                if self._turn_phase == "idle":
+                    self._turn_phase = "move"
+                    self._turn_until = now + step_turn
+                if self._turn_phase == "pause":
+                    self.stop_wheels()
+                    if now >= self._turn_until:
+                        self._turn_phase = "idle"
+                    return
+                if now >= self._turn_until:
+                    self._turn_phase = "pause"
+                    self._turn_until = now + step_pause
+                    self.stop_wheels()
+                    return
             self._set_drive(turn=self._drive_turn_smooth, forward=0.0)
             LOGGER.debug("Auto TRACKING: Target=%s, Turn=%.2f", color, self._drive_turn_smooth)
             return
@@ -879,6 +926,8 @@ class RobotController:
                 self._step_phase = "idle"
                 self._step_direction = 0
                 self._align_hold_started = 0.0
+                self._turn_phase = "idle"
+                self._turn_direction = 0
                 self.stop_wheels()
                 return
 
