@@ -155,6 +155,7 @@ class RobotController:
         self._step_until: float = 0.0
         self._step_direction: int = 0
         self._turn_error_prev: float = 0.0
+        self._align_hold_started: float = 0.0
         self.autopilot_config: Dict[str, float] = {}
 
         # Once config yüklensin, sonra donanim baglansin (pinler config'ten gelsin)
@@ -511,6 +512,7 @@ class RobotController:
             "target_speed_scale": 0.02,
             "target_turn_scale": 0.01,
             "align_center_tol_ratio": 0.08,
+            "align_hold_sec": 0.3,
             "turn_kp": 1.0,
             "turn_kd": 0.3,
             "turn_smooth_alpha": 0.6,
@@ -611,6 +613,7 @@ class RobotController:
         self._step_until = 0.0
         self._step_direction = 0
         self._turn_error_prev = 0.0
+        self._align_hold_started = 0.0
         self._tracking_zone = 0
         self._recompute_power()
         # otomatik tarama sirasinda baslatilan hareketleri de temizle
@@ -774,6 +777,7 @@ class RobotController:
                 self._step_direction = 0
                 self._turn_error_prev = 0.0
                 self._drive_turn_smooth = 0.0
+                self._align_hold_started = 0.0
                 self.stop_all_motion()
                 return
 
@@ -810,6 +814,16 @@ class RobotController:
             tol_px = max(6.0, width * tol_ratio)
             error = align_cx - center_x
             if abs(error) <= tol_px:
+                align_hold = max(0.0, float(cfg.get("align_hold_sec", 0.0)))
+                if align_hold > 0.0:
+                    if self._align_hold_started == 0.0:
+                        self._align_hold_started = now
+                    if now - self._align_hold_started < align_hold:
+                        self._turn_error_prev = 0.0
+                        self._drive_turn_smooth = 0.0
+                        self.stop_wheels()
+                        return
+                self._align_hold_started = 0.0
                 self._turn_error_prev = 0.0
                 self._drive_turn_smooth = 0.0
                 self.stop_wheels()
@@ -819,6 +833,7 @@ class RobotController:
                 self._step_direction = 0
                 LOGGER.debug("Auto: Aligned -> APPROACHING.")
                 return
+            self._align_hold_started = 0.0
 
             error_norm = error / max(1.0, center_x)
             error_norm = max(-1.0, min(1.0, error_norm))
@@ -859,11 +874,11 @@ class RobotController:
                 align_cx = self._cx_smooth
             tol_ratio = float(cfg.get("align_center_tol_ratio", 0.08))
             tol_px = max(6.0, width * tol_ratio)
-            tol_exit = tol_px * 1.4
-            if abs(align_cx - center_x) > tol_exit:
+            if abs(align_cx - center_x) > tol_px:
                 self.autopilot_state = AutopilotState.TRACKING
                 self._step_phase = "idle"
                 self._step_direction = 0
+                self._align_hold_started = 0.0
                 self.stop_wheels()
                 return
 
